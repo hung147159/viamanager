@@ -99,52 +99,13 @@ public static class TotpGenerator
 
 public static class CookieHelper
 {
+    /// <summary>
+    /// Formats page cookie using verbatim serialization directly from the browser context.
+    /// Absolute Invariant: Zero Cookie Mutation. Never inject synthetic i_user or override c_user.
+    /// </summary>
     public static string FormatPageCookie(IReadOnlyList<BrowserContextCookiesResult> cookies, string pageId, string fallbackUid)
     {
-        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var c in cookies)
-        {
-            if (!string.IsNullOrWhiteSpace(c.Name))
-                map[c.Name] = c.Value ?? "";
-        }
-
-        var orderedKeys = new[] { "c_user", "datr", "dpr", "ps_l", "ps_n", "sb", "xs", "i_user", "fr", "wd" };
-        var parts = new List<string>();
-
-        foreach (var key in orderedKeys)
-        {
-            if (key.Equals("i_user", StringComparison.OrdinalIgnoreCase))
-            {
-                parts.Add($"i_user={pageId}");
-            }
-            else if (key.Equals("c_user", StringComparison.OrdinalIgnoreCase))
-            {
-                // Cookie của Page: c_user đại diện cho ID của Page
-                string val = map.TryGetValue("c_user", out var cVal) && !string.IsNullOrWhiteSpace(cVal) ? cVal : "";
-                if (string.Equals(val, fallbackUid, StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(val))
-                {
-                    val = pageId;
-                }
-                parts.Add($"c_user={val}");
-            }
-            else
-            {
-                if (map.TryGetValue(key, out var val) && !string.IsNullOrWhiteSpace(val))
-                {
-                    parts.Add($"{key}={val}");
-                }
-            }
-        }
-
-        foreach (var kvp in map)
-        {
-            if (!orderedKeys.Contains(kvp.Key, StringComparer.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kvp.Value))
-            {
-                parts.Add($"{kvp.Key}={kvp.Value}");
-            }
-        }
-
-        return string.Join("; ", parts);
+        return ViaManager.Utilities.CookieSerializer.SerializeVerbatim(cookies);
     }
 
     public static string ExtractCookieValue(string cookieString, string key)
@@ -370,90 +331,7 @@ public static class AccountRepository
 {
     public static void InitializeDatabase(string connectionString)
     {
-        using var conn = new SqliteConnection(connectionString);
-        conn.Open();
-
-        using (var pragmaWal = conn.CreateCommand())
-        {
-            pragmaWal.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=15000;";
-            pragmaWal.ExecuteNonQuery();
-        }
-
-        using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS Accounts (
-                    ID TEXT PRIMARY KEY,
-                    PASS TEXT,
-                    Ma2FA TEXT,
-                    MAIL TEXT,
-                    PASS_MAIL TEXT,
-                    TrangThai TEXT,
-                    VaiTro TEXT,
-                    TenTaiKhoan TEXT,
-                    BM TEXT,
-                    BM_Mail TEXT,
-                    Cookie TEXT,
-                    Token TEXT,
-                    LastRunTime TEXT,
-                    PageCount INTEGER DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS AssignedPages (
-                    Page_ID TEXT PRIMARY KEY,
-                    BM TEXT,
-                    Via_UID TEXT,
-                    Session_Data TEXT
-                );
-            ";
-            cmd.ExecuteNonQuery();
-        }
-
-        using (var pragmaCmd = conn.CreateCommand())
-        {
-            pragmaCmd.CommandText = "PRAGMA table_info(Accounts);";
-            using var reader = pragmaCmd.ExecuteReader();
-            bool hasToken = false;
-            bool hasLastRunTime = false;
-            bool hasPageCount = false;
-            while (reader.Read())
-            {
-                string colName = reader.GetString(1);
-                if (colName.Equals("Token", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasToken = true;
-                }
-                if (colName.Equals("LastRunTime", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasLastRunTime = true;
-                }
-                if (colName.Equals("PageCount", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasPageCount = true;
-                }
-            }
-
-            if (!hasToken)
-            {
-                using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = "ALTER TABLE Accounts ADD COLUMN Token TEXT;";
-                alterCmd.ExecuteNonQuery();
-            }
-
-            if (!hasLastRunTime)
-            {
-                using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = "ALTER TABLE Accounts ADD COLUMN LastRunTime TEXT;";
-                alterCmd.ExecuteNonQuery();
-            }
-
-            if (!hasPageCount)
-            {
-                using var alterCmd = conn.CreateCommand();
-                alterCmd.CommandText = "ALTER TABLE Accounts ADD COLUMN PageCount INTEGER DEFAULT 0;";
-                alterCmd.ExecuteNonQuery();
-            }
-        }
+        ViaManager.Data.DatabaseMigrationService.Migrate(connectionString);
     }
 
     public static int BatchUpsert(string connectionString, IEnumerable<AccountItem> accounts)

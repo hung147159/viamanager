@@ -13,6 +13,14 @@ public partial class Form1 : Form
 
     private readonly string _dbPath;
     private readonly string _connectionString;
+    private readonly ViaManager.Data.AccountRepository _accountRepository;
+    private readonly ViaManager.Data.PageRepository _pageRepository;
+    private readonly ViaManager.Services.IBrowserProfileService _browserProfileService;
+    private readonly ViaManager.Services.IViaAuthenticationService _viaAuthService;
+    private readonly ViaManager.Services.IPageDiscoveryService _pageDiscoveryService;
+    private readonly ViaManager.Services.IPageSwitchService _pageSwitchService;
+    private readonly ViaManager.Services.IPageVerificationService _pageVerificationService;
+    private readonly ViaManager.Services.IPageSessionService _pageSessionService;
 
     // Khởi tạo điều phối đa luồng động (Dynamic Threading) theo tổng số Page quét được
     private SemaphoreSlim _concurrencySemaphore = new SemaphoreSlim(1, 1);
@@ -33,6 +41,20 @@ public partial class Form1 : Form
 
         _dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ViaManager.db");
         _connectionString = $"Data Source={_dbPath}";
+
+        _accountRepository = new ViaManager.Data.AccountRepository(_connectionString);
+        _pageRepository = new ViaManager.Data.PageRepository(_connectionString);
+        _browserProfileService = new ViaManager.Services.BrowserProfileService();
+        _viaAuthService = new ViaManager.Services.ViaAuthenticationService();
+        _pageDiscoveryService = new ViaManager.Services.PageDiscoveryService();
+        _pageSwitchService = new ViaManager.Services.PageSwitchService();
+        _pageVerificationService = new ViaManager.Services.PageVerificationService();
+        _pageSessionService = new ViaManager.Services.PageSessionService(
+            _pageDiscoveryService,
+            _pageSwitchService,
+            _pageVerificationService,
+            _pageRepository,
+            _accountRepository);
     }
 
     private void Form1_Load(object? sender, EventArgs e)
@@ -447,698 +469,113 @@ public partial class Form1 : Form
     // ==========================================
     private async Task RunViaProfileAsync(DataGridViewRow row, string id, string rawCookie, string pass, string ma2fa, string bm, bool showDialog = false, bool isHeadless = true)
     {
-        IBrowserContext? context = null;
-        IPlaywright? playwright = null;
+        SetRowStatus(row, id, "running");
+        _accountRepository.UpdateAccountStatus(id, "running");
+        LogConsole(id, $"Bắt đầu chạy VIA. Trạng thái: running. Headless={isHeadless}");
+        UpdateStatusLabel($"UID: {id} - Đang khởi động trình duyệt...");
+
+        var account = new ViaManager.Models.ViaAccount
+        {
+            Uid = id,
+            Password = pass,
+            TwoFactorSecret = ma2fa,
+            Cookie = rawCookie,
+            BusinessManager = bm,
+            Status = "running"
+        };
 
         try
         {
-            // Cập nhật trạng thái "running" trên DataGridView và in log Console
-            SetRowStatus(row, id, "running");
-            AccountRepository.UpdateAccountStatus(_connectionString, id, "running");
-            LogConsole(id, "Bắt đầu chạy Via. Đang mở trình duyệt Chrome (Headless=false)...");
-            UpdateStatusLabel($"UID: {id} - Đang mở trình duyệt...");
+            await using var session = await _browserProfileService.AcquireSessionAsync(id, isHeadless).ConfigureAwait(false);
 
-            // Khởi tạo thư mục Profile cố định cho UID
-            string profilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserProfiles", id);
-            Directory.CreateDirectory(profilePath);
-
-            playwright = await Playwright.CreateAsync();
-
-            string channel = File.Exists(@"C:\Program Files\Google\Chrome\Application\chrome.exe") ||
-                             File.Exists(@"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")
-                             ? "chrome" : "msedge";
-
-            context = await playwright.Chromium.LaunchPersistentContextAsync(
-                profilePath,
-                new BrowserTypeLaunchPersistentContextOptions
-                {
-                    Headless = false,
-                    Channel = channel,
-                    UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    Args = new[]
-                    {
-                        "--disable-blink-features=AutomationControlled",
-                        "--start-maximized",
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--ignore-certificate-errors",
-                        "--enable-features=NetworkService,NetworkServiceInProcess",
-                        "--dns-prefetch-disable"
-                    },
-                    ViewportSize = ViewportSize.NoViewport
-                }
-            );
-
-            bool loggedInWithCookie = false;
-            var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
-
-            // BƯỚC 1: Thử đăng nhập bằng Cookie nếu có dữ liệu cookie
-            if (!string.IsNullOrWhiteSpace(rawCookie))
+            var authResult = await _viaAuthService.EnsureAuthenticatedAsync(session, account).ConfigureAwait(false);
+            if (!authResult.IsSuccess)
             {
-                LogConsole(id, "Đang nạp Cookie vào trình duyệt và kiểm tra đăng nhập trên facebook.com...");
-                UpdateStatusLabel($"UID: {id} - Đang tiêm Cookie vào trình duyệt...");
-
-                var cookieList = CookieHelper.ParseCookieString(rawCookie);
-                if (cookieList.Count > 0)
-                {
-                    await context.AddCookiesAsync(cookieList);
-                }
-
-                await page.GotoAsync("https://www.facebook.com", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
-                await Task.Delay(4000);
-
-                var initialCookies = await context.CookiesAsync();
-                bool hasCUser = initialCookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
-                string url = page.Url;
-
-                if (url.Contains("checkpoint", StringComparison.OrdinalIgnoreCase))
-                {
-                    SetRowStatus(row, id, "check");
-                    AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
-
-                    LogConsole(id, $"[CHECKPOINT] Tài khoản bị Checkpoint! URL: {url}");
-                    UpdateStatusLabel($"UID: {id} - Trạng thái: CHECKPOINT!");
-                    if (showDialog)
-                    {
-                        MessageBox.Show($"Tài khoản {id} bị CHECKPOINT!\nURL: {url}\nĐã cập nhật trạng thái 'check' và giải phóng các Page liên kết trong nhóm BM '{bm}'.",
-                            "Cảnh báo Checkpoint", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    return;
-                }
-
-                if (hasCUser)
-                {
-                    loggedInWithCookie = true;
-                    LogConsole(id, "Đăng nhập thành công bằng Cookie!");
-                }
-            }
-
-            // BƯỚC 2: FALLBACK tự động đăng nhập bằng ID / PASS / 2FA khi Cookie bị DIE hoặc không có c_user
-            if (!loggedInWithCookie)
-            {
-                if (string.IsNullOrWhiteSpace(pass))
-                {
-                    SetRowStatus(row, id, "check");
-                    AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
-
-                    LogConsole(id, "[LỖI] Cookie hết hạn và không có mật khẩu (PASS) để Fallback đăng nhập!");
-                    UpdateStatusLabel($"UID: {id} - Cookie DIE và không có mật khẩu để Fallback!");
-                    if (showDialog)
-                    {
-                        MessageBox.Show($"Tài khoản {id} có Cookie đã bị DIE (hết hạn), đồng thời cột PASS đang trống nên không thể tự động đăng nhập lại!",
-                            "Không thể đăng nhập", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    return;
-                }
-
-                LogConsole(id, "Cookie hết hạn/không có. Đang Fallback tự động đăng nhập bằng ID / PASS / 2FA...");
-                UpdateStatusLabel($"UID: {id} - Cookie hết hạn. Đang Fallback tự động đăng nhập bằng ID / PASS / 2FA...");
-
-                if (!page.Url.Contains("facebook.com"))
-                {
-                    await page.GotoAsync("https://www.facebook.com", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
-                    await Task.Delay(2000);
-                }
-
-                var emailInput = page.Locator("input[name='email'], #email");
-                if (await emailInput.CountAsync() > 0)
-                {
-                    await emailInput.First.FillAsync(id);
-                    await page.FillAsync("input[name='pass'], #pass", pass);
-
-                    var loginBtn = page.Locator("button[name='login'], button[type='submit'], button:has-text('Đăng nhập'), button:has-text('Log In')");
-                    if (await loginBtn.CountAsync() > 0)
-                    {
-                        await loginBtn.First.ClickAsync();
-                    }
-                    else
-                    {
-                        await page.Keyboard.PressAsync("Enter");
-                    }
-
-                    try
-                    {
-                        await page.WaitForURLAsync(u => u.Contains("checkpoint") || u.Contains("home") || u.Contains("two_factor") || u.Contains("login"), new() { Timeout = 15000 });
-                    }
-                    catch { }
-
-                    await Task.Delay(3000);
-
-                    // Xử lý 2FA nếu có yêu cầu
-                    var otpInputs = page.Locator("input[name='approvals_code'], input[type='tel'], input[placeholder*='code'], input[placeholder*='mã']");
-                    if (await otpInputs.CountAsync() > 0 && !string.IsNullOrWhiteSpace(ma2fa))
-                    {
-                        UpdateStatusLabel($"UID: {id} - Đang sinh mã TOTP 2FA và điền tự động...");
-
-                        string otp = TotpGenerator.GenerateTotp(ma2fa);
-                        if (!string.IsNullOrEmpty(otp))
-                        {
-                            await otpInputs.First.FillAsync(otp);
-                            var submitBtn = page.Locator("button[type='submit'], #checkpointSubmitButton, button[id*='checkpoint']");
-                            if (await submitBtn.CountAsync() > 0)
-                            {
-                                await submitBtn.First.ClickAsync();
-                            }
-                            else
-                            {
-                                await page.Keyboard.PressAsync("Enter");
-                            }
-                            await Task.Delay(4000);
-                        }
-                    }
-                }
-
-                // Kiểm tra trạng thái sau khi Fallback
-                var postLoginCookies = await context.CookiesAsync();
-                bool hasCUserAfterFallback = postLoginCookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
-                string postUrl = page.Url;
-
-                if (postUrl.Contains("checkpoint", StringComparison.OrdinalIgnoreCase))
-                {
-                    SetRowStatus(row, id, "check");
-                    AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
-
-                    LogConsole(id, $"[CHECKPOINT] Bị Checkpoint sau khi đăng nhập ID/PASS! URL: {postUrl}");
-                    UpdateStatusLabel($"UID: {id} - Bị CHECKPOINT sau khi đăng nhập ID/PASS!");
-                    if (showDialog)
-                    {
-                        MessageBox.Show($"Tài khoản {id} bị CHECKPOINT sau khi đăng nhập ID/PASS!\nURL: {postUrl}\nĐã cập trạng thái 'check'.",
-                            "Cảnh báo Checkpoint", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    return;
-                }
-
-                if (!hasCUserAfterFallback)
-                {
-                    SetRowStatus(row, id, "check");
-                    AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
-
-                    LogConsole(id, $"[LỖI] Đăng nhập Fallback thất bại (sai mật khẩu hoặc bị chặn)! URL: {postUrl}");
-                    UpdateStatusLabel($"UID: {id} - Đăng nhập Fallback thất bại!");
-                    if (showDialog)
-                    {
-                        MessageBox.Show($"Tài khoản {id} không thể đăng nhập bằng ID/PASS (sai mật khẩu hoặc bị chặn)!\nURL: {postUrl}\nĐã cập nhật trạng thái 'check'.",
-                            "Đăng nhập thất bại", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    return;
-                }
-
-                LogConsole(id, "Đăng nhập Fallback thành công!");
-            }
-
-            // BƯỚC 3: ĐĂNG NHẬP THÀNH CÔNG (Dù bằng Cookie hay bằng Fallback ID/PASS/2FA)
-            var currentCookies = await context.CookiesAsync();
-
-            // Tự động lấy lại bộ Cookie mới tinh từ trình duyệt lưu vào database và DataGridView
-            string fullCookie = string.Join("; ", currentCookies.Select(c => $"{c.Name}={c.Value}"));
-            SetRowCookie(row, fullCookie);
-            AccountRepository.UpdateAccountCookie(_connectionString, id, fullCookie);
-
-            LogConsole(id, "Đang cào ID Page từ giao diện Facebook https://www.facebook.com/pages/?category=your_pages...");
-            UpdateStatusLabel($"UID: {id} - Đang cào ID Page từ giao diện...");
-
-            // 1.1. Điều hướng trình duyệt đến "https://www.facebook.com/pages/?category=your_pages" và đợi load xong DOM
-            await page.GotoAsync("https://www.facebook.com/pages/?category=your_pages", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 35000 });
-            await Task.Delay(3500);
-
-            // Lấy UID sạch của Via và c_user hiện tại để làm màng lọc loại trừ
-            string cleanViaId = id.Trim();
-            string viaCUser = currentCookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase))?.Value?.Trim() ?? "";
-
-            // 1.2. Dùng page.EvaluateAsync tiêm mã JavaScript trích xuất danh sách Page ID từ các link href
-            // Điều kiện lọc trong JS: ID phải là chuỗi số (>10 ký tự) và BẮT BUỘC KHÁC với ID của Via đang chạy. Lọc trùng lặp ngay trong mảng JS.
-            string jsExtractPageIds = @"
-                (args) => {
-                    const viaUid = (args.viaUid || '').trim().toLowerCase();
-                    const viaCUser = (args.viaCUser || '').trim().toLowerCase();
-                    const pageIdSet = new Set();
-
-                    const container = document.querySelector(""div[role='main']"") || document.querySelector(""main"") || document.body;
-                    const links = container.querySelectorAll(""a[href]"");
-
-                    // Regex nhận diện Page ID
-                    const idRegex = /(?:id=|\/profile\.php\?id=|\/pages\/[^\/]+\/|\/pages\/|\/)(615\d{11,13}|\d{11,20})(?:[/?#&]|$)/i;
-
-                    const excludedKeywords = [
-                        '/friends', '/watch', '/marketplace', '/groups', '/gaming', '/bookmarks',
-                        '/events', '/saved', '/memories', '/messages', '/notifications', '/settings',
-                        '/privacy', '/policies', '/help', '/create', '/invites', 'category=your_pages',
-                        '/ads', '/business', '/login', '/recover', '/user/'
-                    ];
-
-                    for (const a of links) {
-                        const href = (a.getAttribute('href') || '').trim();
-                        if (!href) continue;
-
-                        const lowerHref = href.toLowerCase();
-                        if (excludedKeywords.some(kw => lowerHref.includes(kw))) continue;
-
-                        const match = href.match(idRegex);
-                        if (match && match[1]) {
-                            const pid = match[1].trim();
-
-                            // Điều kiện: ID phải là chuỗi số dài hơn 10 ký tự
-                            if (pid.length > 10 && /^\d+$/.test(pid)) {
-                                // Bỏ qua UID cá nhân 1000... nếu không nằm trong đường dẫn /pages/ hoặc profile.php?id=
-                                if (pid.startsWith('1000') && !lowerHref.includes('/pages/') && !lowerHref.includes('profile.php?id=')) {
-                                    continue;
-                                }
-
-                                const lowerPid = pid.toLowerCase();
-                                // BẮT BUỘC KHÁC với ID của Via đang chạy và cookie c_user của Via
-                                if (lowerPid === viaUid || (viaCUser && lowerPid === viaCUser)) {
-                                    continue;
-                                }
-
-                                pageIdSet.add(pid);
-                            }
-                        }
-                    }
-
-                    // Lọc trùng lặp ngay trong mảng JS
-                    return Array.from(pageIdSet);
-                }
-            ";
-
-            string[] extractedPageIds = await page.EvaluateAsync<string[]>(jsExtractPageIds, new { viaUid = cleanViaId, viaCUser });
-
-            // 1.3. Lấy Count của mảng này gán vào DataGridView cột 'PageCount'. Nếu Count = 0 thì return luôn.
-            int validPageCount = extractedPageIds.Length;
-            SetRowPageCount(row, validPageCount);
-            AccountRepository.UpdateAccountPageCount(_connectionString, id, validPageCount);
-            UpdateDynamicThreadCount();
-
-            LogConsole(id, $"Số lượng Page lấy được: {validPageCount} Page. Danh sách ID: [{(validPageCount > 0 ? string.Join(", ", extractedPageIds) : "Không có")}]");
-
-            if (validPageCount == 0)
-            {
-                SetRowStatus(row, id, "live");
-                AccountRepository.UpdateAccountStatus(_connectionString, id, "live");
-                LogConsole(id, "Tài khoản không có Page nào (Count = 0). Hoàn thành!");
-                UpdateStatusLabel($"UID: {id} - Tài khoản không có Page nào (Count = 0).");
+                string statusToSet = authResult.ErrorCode == "CHECKPOINT" ? "check" : "check";
+                SetRowStatus(row, id, statusToSet);
+                _accountRepository.UpdateAccountStatus(id, statusToSet);
+                _pageRepository.ReleaseAssignedPages(id);
+                LogConsole(id, $"[XÁC THỰC THẤT BẠI] {authResult.Message}");
+                UpdateStatusLabel($"UID: {id} - Xác thực thất bại: {authResult.Message}");
                 if (showDialog)
                 {
-                    MessageBox.Show($"Tài khoản {id} đang LIVE, nhưng không tìm thấy Page nào (Count = 0) trên tài khoản này.",
-                        "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    this.Invoke(() => MessageBox.Show($"Xác thực thất bại cho UID {id}: {authResult.Message}", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning));
                 }
                 return;
             }
 
-            LogConsole(id, $"Bắt đầu chuyển vai trò (Switch Profile) bằng UI Playwright (Tổng cộng {validPageCount} Page)...");
-            UpdateStatusLabel($"UID: {id} - Đang chuyển vai trò bằng giao diện Playwright...");
-
-            List<string> exportedCookies = new List<string>();
-            var pageRecords = new List<(string PageId, string SessionData)>();
-
-            foreach (var pid in extractedPageIds)
+            var progressReporter = new Progress<string>(msg =>
             {
-                // Bọc try-catch chi tiết cho TỪNG BƯỚC bên trong vòng lặp duyệt Page ID
-                try
-                {
-                    LogConsole(id, $"Đang điều hướng tới Page https://www.facebook.com/{pid}...");
-                    UpdateStatusLabel($"UID: {id} - Đang điều hướng tới Page {pid}...");
+                UpdateStatusLabel($"UID: {id} - {msg}");
+                LogConsole(id, msg);
+            });
 
-                    // 1. Điều hướng tới trang Page
-                    try
-                    {
-                        await page.GotoAsync($"https://www.facebook.com/{pid}", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 35000 });
-                        await Task.Delay(3000);
-                    }
-                    catch (Exception exGoto)
-                    {
-                        LogConsole(id, $"[LỖI GOTO] Điều hướng tới Page {pid} thất bại: {exGoto.Message}");
-                        UpdateStatusLabel($"UID: {id} - Lỗi tải trang Page {pid}: {exGoto.Message}");
-                        continue;
-                    }
+            var switchResults = await _pageSessionService.ProcessViaPagesAsync(session, account, progressReporter).ConfigureAwait(false);
 
-                    // 2. Kiểm tra nếu phiên hiện tại đã là Page này (c_user == pid)
-                    bool switchSuccess = false;
-                    string matchedCookieText = "";
-                    string detectedCUser = "";
+            int verifiedCount = switchResults.Count(r => r.IsSuccess);
+            SetRowPageCount(row, verifiedCount);
 
-                    var initialCheckCookies = await context.CookiesAsync();
-                    var initCUser = initialCheckCookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase))?.Value?.Trim() ?? "";
-
-                    if (string.Equals(initCUser, pid, StringComparison.OrdinalIgnoreCase))
-                    {
-                        switchSuccess = true;
-                        detectedCUser = initCUser;
-                        matchedCookieText = CookieHelper.FormatPageCookie(initialCheckCookies, pid, id);
-                        LogConsole(id, $"Phiên hiện tại đã là Page {pid} (c_user={initCUser}). Không cần bấm đổi vai trò.");
-                    }
-                    else
-                    {
-                        // 3. Tìm nút Switch Profile (Chuyển / Đổi / Switch Now) trên giao diện Playwright
-                        LogConsole(id, $"Đang tìm nút Switch Profile (Đổi / Switch Now) trên giao diện Page {pid}...");
-
-                        var switchCandidateSelectors = new[]
-                        {
-                            "div[role='button']:has-text('Switch now')",
-                            "div[role='button']:has-text('Chuyển ngay')",
-                            "div[role='button']:has-text('Switch Now')",
-                            "div[role='button']:has-text('Đổi ngay')",
-                            "div[aria-label='Switch']",
-                            "div[aria-label='Chuyển']",
-                            "div[aria-label='Đổi']",
-                            "div[aria-label*='Switch Now' i]",
-                            "div[aria-label*='Chuyển ngay' i]",
-                            "div[aria-label*='Đổi ngay' i]",
-                            "div[aria-label*='Switch to' i]",
-                            "div[aria-label*='Chuyển sang' i]",
-                            "div[aria-label*='Switch into' i]",
-                            "div[role='button']:has-text('Switch')",
-                            "div[role='button']:has-text('Chuyển')",
-                            "div[role='button']:has-text('Đổi')",
-                            "a:has-text('Switch now')",
-                            "a:has-text('Chuyển ngay')",
-                            "a:has-text('Switch')",
-                            "a:has-text('Chuyển')",
-                            "a:has-text('Đổi')",
-                            "button:has-text('Switch now')",
-                            "button:has-text('Chuyển ngay')",
-                            "button:has-text('Switch')",
-                            "button:has-text('Chuyển')",
-                            "button:has-text('Đổi')"
-                        };
-
-                        ILocator? targetButton = null;
-                        string clickedSelector = "";
-
-                        foreach (var sel in switchCandidateSelectors)
-                        {
-                            try
-                            {
-                                var loc = page.Locator(sel);
-                                int count = await loc.CountAsync();
-                                for (int i = 0; i < count; i++)
-                                {
-                                    var item = loc.Nth(i);
-                                    if (await item.IsVisibleAsync())
-                                    {
-                                        string text = (await item.InnerTextAsync() ?? "").Trim().ToLowerInvariant();
-                                        string aria = (await item.GetAttributeAsync("aria-label") ?? "").Trim().ToLowerInvariant();
-                                        string combined = $"{text} {aria}";
-
-                                        // Loại trừ các nút không liên quan
-                                        if (combined.Contains("mật khẩu") || combined.Contains("password") || combined.Contains("language"))
-                                            continue;
-
-                                        targetButton = item;
-                                        clickedSelector = sel;
-                                        break;
-                                    }
-                                }
-                                if (targetButton != null) break;
-                            }
-                            catch { }
-                        }
-
-                        // [NGUYÊN TẮC 1]: ĐỒNG BỘ THỜI GIAN CLICK VÀ NAVIGATION
-                        if (targetButton != null)
-                        {
-                            LogConsole(id, $"Tìm thấy nút Switch ({clickedSelector}). Đang đồng bộ Click và WaitForLoadState(NetworkIdle)...");
-                            try
-                            {
-                                await Task.WhenAll(
-                                    page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }),
-                                    targetButton.ClickAsync(new() { Timeout = 10000 })
-                                );
-                            }
-                            catch (TimeoutException)
-                            {
-                                LogConsole(id, "WaitForLoadState NetworkIdle quá 15s (kết nối ngầm giữ phiên), tiếp tục...");
-                            }
-                            catch (Exception exClick)
-                            {
-                                LogConsole(id, $"[LỖI CLICK] Click nút Switch gặp lỗi: {exClick.Message}. Thử click trực tiếp...");
-                                try { await targetButton.ClickAsync(new() { Timeout = 5000 }); } catch { }
-                            }
-
-                            await Task.Delay(2000);
-
-                            // Kiểm tra nếu xuất hiện Dialog popup xác nhận "Switch into ..." / "Chuyển sang ..."
-                            try
-                            {
-                                var dialogConfirmBtn = page.Locator("div[role='dialog'] div[role='button']:has-text('Switch'), div[role='dialog'] div[role='button']:has-text('Chuyển'), div[role='dialog'] div[role='button']:has-text('Đổi'), div[role='dialog'] button:has-text('Switch'), div[role='dialog'] button:has-text('Chuyển')");
-                                if (await dialogConfirmBtn.CountAsync() > 0 && await dialogConfirmBtn.First.IsVisibleAsync())
-                                {
-                                    LogConsole(id, "Bắt được popup xác nhận đổi phiên. Đồng bộ Click xác nhận với WaitForLoadState(NetworkIdle)...");
-                                    try
-                                    {
-                                        await Task.WhenAll(
-                                            page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }),
-                                            dialogConfirmBtn.First.ClickAsync(new() { Timeout = 8000 })
-                                        );
-                                    }
-                                    catch (TimeoutException)
-                                    {
-                                        LogConsole(id, "Xác nhận popup: WaitForLoadState quá 15s, tiếp tục...");
-                                    }
-                                    catch (Exception exDialogClick)
-                                    {
-                                        LogConsole(id, $"[LỖI POPUP CLICK] Click xác nhận: {exDialogClick.Message}");
-                                        try { await dialogConfirmBtn.First.ClickAsync(new() { Timeout = 5000 }); } catch { }
-                                    }
-                                    await Task.Delay(2000);
-                                }
-                            }
-                            catch { }
-                        }
-                        else
-                        {
-                            // [NGUYÊN TẮC 2]: NẾU KHÔNG THẤY NÚT TRÊN TRANG, THỬ KỊCH BẢN CLICK AVATAR GÓC PHẢI TRÊN CÙNG
-                            LogConsole(id, $"Không tìm thấy nút Switch trực tiếp trên trang Page {pid}. Thử kịch bản click Avatar góc phải trên cùng...");
-                            try
-                            {
-                                var avatarLocators = page.Locator("svg[aria-label='Your profile'], svg[aria-label='Trang cá nhân của bạn'], div[aria-label='Your profile'][role='button'], div[aria-label='Trang cá nhân của bạn'][role='button'], div[aria-label='Your profile'], div[aria-label='Trang cá nhân của bạn'], div[role='banner'] div[role='button']:has(image), div[role='banner'] div[role='button']:has(img)");
-                                if (await avatarLocators.CountAsync() > 0 && await avatarLocators.First.IsVisibleAsync())
-                                {
-                                    LogConsole(id, "Đang click Avatar menu góc phải trên cùng...");
-                                    await avatarLocators.First.ClickAsync(new() { Timeout = 5000 });
-                                    await Task.Delay(2000);
-
-                                    // Tìm nút 'See all profiles' / 'Xem tất cả trang cá nhân'
-                                    var seeAllProfiles = page.Locator("div[role='button']:has-text('See all profiles'), div[role='button']:has-text('Xem tất cả trang cá nhân'), div[role='button']:has-text('Xem tất cả các trang cá nhân'), span:has-text('See all profiles'), span:has-text('Xem tất cả trang cá nhân')");
-                                    if (await seeAllProfiles.CountAsync() > 0 && await seeAllProfiles.First.IsVisibleAsync())
-                                    {
-                                        LogConsole(id, "Đang click 'See all profiles'...");
-                                        await seeAllProfiles.First.ClickAsync(new() { Timeout = 5000 });
-                                        await Task.Delay(2000);
-                                    }
-
-                                    // Tìm profile có ID là pid
-                                    var pageItem = page.Locator($"a[href*='{pid}'], div[role='button']:has-text('{pid}')");
-                                    if (await pageItem.CountAsync() > 0 && await pageItem.First.IsVisibleAsync())
-                                    {
-                                        LogConsole(id, $"Tìm thấy Page {pid} trong danh sách profile. Đang click chuyển với WaitForLoadState(NetworkIdle)...");
-                                        try
-                                        {
-                                            await Task.WhenAll(
-                                                page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }),
-                                                pageItem.First.ClickAsync(new() { Timeout = 8000 })
-                                            );
-                                        }
-                                        catch (TimeoutException) { }
-                                        catch (Exception)
-                                        {
-                                            try { await pageItem.First.ClickAsync(new() { Timeout = 5000 }); } catch { }
-                                        }
-                                        await Task.Delay(2000);
-                                    }
-                                }
-                            }
-                            catch (Exception exAvatar)
-                            {
-                                LogConsole(id, $"[CẢNH BÁO] Kịch bản Avatar menu gặp lỗi: {exAvatar.Message}");
-                            }
-                        }
-
-                        // [NGUYÊN TẮC 3]: VÒNG LẶP POLLING KẾT HỢP RELOAD ÉP NẠP HEADER COOKIE
-                        LogConsole(id, $"Bắt đầu vòng lặp Polling & Reload để kiểm tra Cookie c_user={pid}...");
-
-                        int maxAttempts = 6;
-                        for (int attempt = 1; attempt <= maxAttempts; attempt++)
-                        {
-                            var browserCookies = await context.CookiesAsync();
-                            var cUserCookie = browserCookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase));
-                            detectedCUser = cUserCookie?.Value?.Trim() ?? "";
-
-                            LogConsole(id, $"[Polling {attempt}/{maxAttempts}] c_user hiện tại: '{detectedCUser}' (cần '{pid}')");
-
-                            // Chỉ khi c_user khớp với ID Page mới được break vòng lặp và ghi nhận thành công
-                            if (string.Equals(detectedCUser, pid, StringComparison.OrdinalIgnoreCase))
-                            {
-                                switchSuccess = true;
-                                matchedCookieText = CookieHelper.FormatPageCookie(browserCookies, pid, id);
-                                break;
-                            }
-
-                            // Nếu trong khi chờ xuất hiện dialog xác nhận chuyển, bấm xác nhận
-                            try
-                            {
-                                var dialogBtn = page.Locator("div[role='dialog'] div[role='button']:has-text('Switch'), div[role='dialog'] div[role='button']:has-text('Chuyển'), div[role='dialog'] div[role='button']:has-text('Đổi'), div[role='dialog'] button:has-text('Switch'), div[role='dialog'] button:has-text('Chuyển')");
-                                if (await dialogBtn.CountAsync() > 0 && await dialogBtn.First.IsVisibleAsync())
-                                {
-                                    LogConsole(id, "Phát hiện popup xác nhận chưa đóng. Bấm nút xác nhận...");
-                                    try
-                                    {
-                                        await Task.WhenAll(
-                                            page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 12000 }),
-                                            dialogBtn.First.ClickAsync(new() { Timeout = 6000 })
-                                        );
-                                    }
-                                    catch { }
-                                    await Task.Delay(2000);
-                                    continue;
-                                }
-                            }
-                            catch { }
-
-                            // Nếu c_user vẫn bằng ID của Via gốc hoặc chưa nhận ID Page, chèn thêm page.ReloadAsync()
-                            if (attempt < maxAttempts)
-                            {
-                                LogConsole(id, $"c_user vẫn chưa nhận ID Page ({detectedCUser} != {pid}). Đang ReloadAsync() để nạp lại header cookie mới nhất từ server...");
-                                await Task.Delay(2000);
-
-                                try
-                                {
-                                    await page.ReloadAsync(new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25000 });
-                                    await Task.Delay(2000);
-                                }
-                                catch (Exception exReload)
-                                {
-                                    LogConsole(id, $"[LỖI RELOAD] Tải lại trang thất bại: {exReload.Message}");
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. Xử lý kết quả kiểm tra Cookie
-                    if (switchSuccess && !string.IsNullOrWhiteSpace(matchedCookieText))
-                    {
-                        string formattedLine = $"{pid} | {matchedCookieText}";
-                        exportedCookies.Add(formattedLine);
-                        pageRecords.Add((pid, matchedCookieText));
-
-                        LogConsole(id, $"[THÀNH CÔNG] Đổi phiên sang Page {pid} thành công (c_user={detectedCUser})! Đã lưu Cookie.");
-                        UpdateStatusLabel($"UID: {id} - Đã lấy Cookie Page {pid} (c_user={pid})!");
-                    }
-                    else
-                    {
-                        LogConsole(id, $"[LỖI] Đổi phiên Page {pid} thất bại! Hết thời gian chờ nhưng c_user hiện tại là '{detectedCUser}' (yêu cầu '{pid}').");
-                        UpdateStatusLabel($"UID: {id} - Lỗi Page {pid}: c_user chưa đổi sang {pid}");
-                        continue;
-                    }
-                }
-                catch (Exception exPage)
-                {
-                    // Bắt mọi lỗi ngoại lệ bất ngờ của từng Page -> in ra Console và tiếp tục Page sau
-                    LogConsole(id, $"[LỖI NGOẠI LỆ PAGE] Ngoại lệ khi xử lý Page {pid}: {exPage.Message}");
-                    UpdateStatusLabel($"UID: {id} - Lỗi Page {pid}: {exPage.Message}");
-                    continue;
-                }
-
-                // Giới hạn an toàn tối đa 10 Page mỗi Via
-                if (exportedCookies.Count >= 10)
-                {
-                    LogConsole(id, "Đã đạt giới hạn an toàn 10 Page cho Via này.");
-                    break;
-                }
-            }
-
-            // Hoàn thành! Giữ nguyên trạng thái live
             SetRowStatus(row, id, "live");
-            AccountRepository.UpdateAccountStatus(_connectionString, id, "live");
-            LogConsole(id, $"Hoàn thành! Đã thu thập được {exportedCookies.Count}/{validPageCount} Cookie Page.");
-            UpdateStatusLabel($"UID: {id} - Hoàn thành! Đã gom được {exportedCookies.Count} Cookie Page.");
+            _accountRepository.UpdateAccountStatus(id, "live");
+
+            var exportedCookies = switchResults
+                .Where(r => r.IsSuccess && r.Snapshot != null)
+                .Select(r => $"{r.PageId} | {r.Snapshot!.RawCookieHeader}")
+                .ToList();
 
             if (exportedCookies.Count > 0)
             {
-                // Lưu danh sách Page và Cookie vào SQLite và DataGridView
-                AccountRepository.AssignPages(_connectionString, bm, id, pageRecords);
-
-                string firstCookie = pageRecords[0].SessionData;
+                string firstCookie = switchResults.First(r => r.IsSuccess).Snapshot!.RawCookieHeader;
                 SetRowCookie(row, firstCookie);
-                AccountRepository.UpdateAccountCookie(_connectionString, id, firstCookie);
+                _accountRepository.UpdateAccountCookie(id, firstCookie);
 
-                // Hiển thị Pop-up qua Invoke để an toàn cho UI thread
                 this.Invoke(new Action(() =>
                 {
                     using var popForm = new FormCookieResult(id, bm, exportedCookies);
                     popForm.ShowDialog(this);
                 }));
             }
-            else
-            {
-                LogConsole(id, $"Cảnh báo: Đã quét {validPageCount} Page nhưng chưa Page nào đổi c_user thành công.");
-                UpdateStatusLabel($"UID: {id} - Đã quét {validPageCount} Page nhưng chưa Page nào đổi c_user thành công.");
-            }
+
+            LogConsole(id, $"Hoàn thành! Thu thập thành công {verifiedCount} Cookie Page hợp lệ.");
+            UpdateStatusLabel($"UID: {id} - Hoàn tất! Đã lưu {verifiedCount} Page.");
         }
         catch (PlaywrightException pex) when (pex.Message.Contains("ERR_NAME_NOT_RESOLVED"))
         {
             SetRowStatus(row, id, "check");
-            AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-            LogConsole(id, $"[LỖI PLAYWRIGHT DNS] {pex.Message}");
+            _accountRepository.UpdateAccountStatus(id, "check");
+            LogConsole(id, $"[LỖI MẠNG / DNS] {pex.Message}");
             UpdateStatusLabel($"UID: {id} - Lỗi phân giải tên miền (DNS/Mạng)!");
             if (showDialog)
             {
-                MessageBox.Show($"Không thể kết nối tới Facebook (net::ERR_NAME_NOT_RESOLVED)!\n\nNguyên nhân & Cách khắc phục:\n1. Ứng dụng được mở từ cửa sổ dòng lệnh Sandbox bị chặn Internet. Hãy mở trực tiếp file 'ViaManager.exe' từ thư mục 'd:\\ViaManager\\bin\\Release\\net8.0-windows\\' ngoài màn hình Windows.\n2. Nếu mở ngoài Windows vẫn gặp lỗi này, hãy đổi DNS máy tính sang 8.8.8.8 / 1.1.1.1 (do nhà mạng chặn facebook.com).",
-                    "Lỗi kết nối mạng", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                this.Invoke(() => MessageBox.Show($"Không thể kết nối tới Facebook (net::ERR_NAME_NOT_RESOLVED)!", "Lỗi kết nối", MessageBoxButtons.OK, MessageBoxIcon.Error));
             }
         }
         catch (Exception ex)
         {
             SetRowStatus(row, id, "check");
-            AccountRepository.UpdateAccountStatus(_connectionString, id, "check");
-            LogConsole(id, $"[LỖI TOÀN CỤC] {ex.Message}");
-            UpdateStatusLabel($"Lỗi chạy UID {id}: {ex.Message}");
+            _accountRepository.UpdateAccountStatus(id, "check");
+            LogConsole(id, $"[LỖI NGOẠI LỆ] {ex.Message}");
+            UpdateStatusLabel($"UID: {id} - Lỗi: {ex.Message}");
             if (showDialog)
             {
-                MessageBox.Show($"Lỗi trong quá trình chạy tự động UID {id}: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                this.Invoke(() => MessageBox.Show($"Lỗi trong quá trình chạy tự động UID {id}: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error));
             }
         }
         finally
         {
-            // [BẢO VỆ COOKIE SỐNG - 3 RÀNG BUỘC NGHIÊM NGẶT KHI KẾT THÚC PHIÊN]:
-            // 1. TUYỆT ĐỐI KHÔNG ĐĂNG XUẤT: Không điều hướng tới URL logout, không click nút đăng xuất.
-            // 2. KHÔNG XÓA COOKIE: Không gọi context.ClearCookiesAsync(), bảo toàn nguyên vẹn Session trong profile.
-            // 3. CHỈ ĐÓNG NGANG: Đóng ngang trình duyệt (context.CloseAsync) ngắt kết nối mà không gửi tín hiệu hủy phiên lên Facebook.
+            var now = DateTime.Now;
             try
             {
-                if (context != null)
-                {
-                    await context.CloseAsync();
-                    await context.DisposeAsync();
-                }
-            }
-            catch { }
-
-            try
-            {
-                playwright?.Dispose();
-            }
-            catch { }
-
-            // Cập nhật cột LastRunTime trong Database thành thời gian hiện tại (DateTime.Now)
-            DateTime now = DateTime.Now;
-            try
-            {
-                AccountRepository.UpdateLastRunTime(_connectionString, id, now);
+                _accountRepository.UpdateLastRunTime(id, now);
                 SetRowLastRunTime(row, now);
 
-                // Nếu trạng thái hiện tại đang KHÔNG phải là 'check' (bị checkpoint), cập nhật nó thành 'lock'
                 string currentStatus = GetRowStatus(row);
-                if (!currentStatus.Equals("check", StringComparison.OrdinalIgnoreCase))
+                if (!currentStatus.Equals("check", StringComparison.OrdinalIgnoreCase) &&
+                    !currentStatus.Equals("die", StringComparison.OrdinalIgnoreCase))
                 {
                     SetRowStatus(row, id, "lock");
-                    AccountRepository.UpdateAccountStatus(_connectionString, id, "lock");
-                    UpdateStatusLabel($"UID: {id} - Đóng ngang trình duyệt an toàn & chuyển sang 'lock' lúc {now:HH:mm:ss}.");
+                    _accountRepository.UpdateAccountStatus(id, "lock");
                 }
-                LogConsole(id, $"Đóng ngang trình duyệt an toàn. Trạng thái cuối: {GetRowStatus(row)}");
             }
             catch { }
         }
@@ -1978,11 +1415,14 @@ public partial class Form1 : Form
                 await Task.Delay(200);
 
                 string existingCookie = row.Cells["Cookie"].Value?.ToString()?.Trim() ?? "";
-                string generatedCookie = string.IsNullOrEmpty(existingCookie)
-                    ? $"c_user={id}; xs={Guid.NewGuid().ToString("N")[..24]}:2:{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}; fr={Guid.NewGuid().ToString("N")[..16]}; datr={Guid.NewGuid().ToString("N")[..16]};"
-                    : existingCookie;
+                if (string.IsNullOrEmpty(existingCookie))
+                {
+                    LogConsole(id, "Tài khoản chưa có Cookie trong DB. Không tạo cookie giả (Zero Synthetic Invariant).");
+                    continue;
+                }
 
-                row.Cells["Cookie"].Value = generatedCookie;
+                string validCookie = existingCookie;
+                row.Cells["Cookie"].Value = validCookie;
                 if (string.IsNullOrEmpty(row.Cells["TrangThai"].Value?.ToString()))
                 {
                     row.Cells["TrangThai"].Value = "live";
@@ -1995,7 +1435,7 @@ public partial class Form1 : Form
                         TrangThai = CASE WHEN TrangThai IS NULL OR TrangThai = '' THEN 'live' ELSE TrangThai END
                     WHERE ID = $id;
                 ";
-                cmd.Parameters.AddWithValue("$cookie", generatedCookie);
+                cmd.Parameters.AddWithValue("$cookie", validCookie);
                 cmd.Parameters.AddWithValue("$id", id);
                 cmd.ExecuteNonQuery();
 

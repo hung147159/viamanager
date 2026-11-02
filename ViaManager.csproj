@@ -9,8 +9,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="ViaManager.Tests\**" />
+    <EmbeddedResource Remove="ViaManager.Tests\**" />
+    <None Remove="ViaManager.Tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
     <PackageReference Include="Microsoft.Playwright" Version="1.64.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
 </Project>
