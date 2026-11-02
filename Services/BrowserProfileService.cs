@@ -75,9 +75,22 @@ namespace ViaManager.Services
                     args.Add("--ignore-certificate-errors");
                 }
 
+                string? channel = null;
+                if (File.Exists(@"C:\Program Files\Google\Chrome\Application\chrome.exe") ||
+                    File.Exists(@"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"))
+                {
+                    channel = "chrome";
+                }
+                else if (File.Exists(@"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe") ||
+                         File.Exists(@"C:\Program Files\Microsoft\Edge\Application\msedge.exe"))
+                {
+                    channel = "msedge";
+                }
+
                 var contextOptions = new BrowserTypeLaunchPersistentContextOptions
                 {
                     Headless = isHeadless, // Respect caller configuration
+                    Channel = channel,
                     Args = args,
                     ViewportSize = new ViewportSize { Width = 1280, Height = 800 },
                     UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -85,7 +98,7 @@ namespace ViaManager.Services
                     TimezoneId = "Asia/Ho_Chi_Minh"
                 };
 
-                AppLogger.Info("BrowserProfileService", $"Launching persistent context for UID {viaUid} (Headless: {isHeadless})");
+                AppLogger.Info("BrowserProfileService", $"Launching persistent context for UID {viaUid} (Headless: {isHeadless}, Channel: {channel ?? "bundled"})");
                 var context = await playwright.Chromium.LaunchPersistentContextAsync(profilePath, contextOptions).ConfigureAwait(false);
                 var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync().ConfigureAwait(false);
 
