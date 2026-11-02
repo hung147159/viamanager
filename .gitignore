@@ -1,0 +1,25 @@
+## Build and output directories
+bin/
+obj/
+out/
+
+## Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+## Browser profiles & session data
+BrowserProfiles/
+.playwright/
+
+## Visual Studio / IDE files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## OS generated files
+.DS_Store
+Thumbs.db
