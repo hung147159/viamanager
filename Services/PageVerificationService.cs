@@ -46,11 +46,20 @@ namespace ViaManager.Services
             AppLogger.Info("PageVerification", $"Verifying active Page identity for Page ID: {expectedPageId} (Expected Name: '{expectedPageName ?? ""}')");
             var detectedSignals = new List<VerificationSignal>();
 
-            // Signal 1: Active Profile UI Identity (Header profile name, avatar aria-label, profile banner)
+            // Signal 1: Active Profile UI Identity (Header profile name, avatar aria-label, admin controls, meta data)
             bool signal1Satisfied = false;
             string signal1Details = "";
             try
             {
+                // 1. Resolve effective page name from parameter or document title
+                string docTitle = "";
+                try { docTitle = await page.TitleAsync().ConfigureAwait(false) ?? ""; } catch { }
+
+                string cleanTitleName = docTitle.Contains('|') ? docTitle.Split('|')[0].Trim() : docTitle.Trim();
+                string effectiveName = !string.IsNullOrWhiteSpace(expectedPageName) && !System.Text.RegularExpressions.Regex.IsMatch(expectedPageName, @"^\d+$")
+                    ? expectedPageName
+                    : cleanTitleName;
+
                 var identitySelectors = new[]
                 {
                     "div[role='navigation'] div[aria-label*='profile']",
@@ -70,12 +79,12 @@ namespace ViaManager.Services
                         string text = (await el.InnerTextAsync().ConfigureAwait(false) ?? "").Trim();
                         string aria = (await el.GetAttributeAsync("aria-label").ConfigureAwait(false) ?? "").Trim();
 
-                        if (!string.IsNullOrEmpty(expectedPageName) &&
-                            (text.Contains(expectedPageName, StringComparison.OrdinalIgnoreCase) ||
-                             aria.Contains(expectedPageName, StringComparison.OrdinalIgnoreCase)))
+                        if (!string.IsNullOrEmpty(effectiveName) && !effectiveName.Equals("Facebook", StringComparison.OrdinalIgnoreCase) &&
+                            (text.Contains(effectiveName, StringComparison.OrdinalIgnoreCase) ||
+                             aria.Contains(effectiveName, StringComparison.OrdinalIgnoreCase)))
                         {
                             signal1Satisfied = true;
-                            signal1Details = $"UI identity matched name '{expectedPageName}' via selector '{sel}'.";
+                            signal1Details = $"UI identity matched name '{effectiveName}' via selector '{sel}'.";
                             break;
                         }
 
@@ -86,6 +95,60 @@ namespace ViaManager.Services
                             signal1Details = $"UI identity matched Page ID '{expectedPageId}' via selector '{sel}'.";
                             break;
                         }
+                    }
+                }
+
+                // 2. Active Page Admin Persona UI verification:
+                // Check if admin management controls are active AND the switch button is consumed
+                if (!signal1Satisfied)
+                {
+                    var pageAdminControls = await page.QuerySelectorAsync(
+                        "div[aria-label='Quản lý'], div[aria-label='Manage'], " +
+                        "div[role='button']:has-text('Quản lý'), div[role='button']:has-text('Manage'), " +
+                        "div:has-text('Bảng điều khiển chuyên nghiệp'), div:has-text('Professional dashboard'), " +
+                        "div[aria-label='Chỉnh sửa trang cá nhân'], div[aria-label='Chỉnh sửa'], div[aria-label='Edit profile']"
+                    ).ConfigureAwait(false);
+
+                    var remainingSwitchBtn = await page.QuerySelectorAsync(
+                        "div[role='button']:has-text('Switch now'), div[role='button']:has-text('Chuyển ngay'), div[aria-label='Switch'], div[aria-label='Chuyển']"
+                    ).ConfigureAwait(false);
+
+                    if (pageAdminControls != null && remainingSwitchBtn == null)
+                    {
+                        signal1Satisfied = true;
+                        signal1Details = "Active Page Admin UI persona verified (Switch button consumed & admin management controls active).";
+                    }
+                }
+
+                // 3. Metadata & Data Layer identity verification
+                if (!signal1Satisfied)
+                {
+                    var metaMatch = await page.EvaluateAsync<bool>($@"
+                        () => {{
+                            try {{
+                                const id = '{expectedPageId}';
+                                const mId = document.querySelector('meta[name=""page_id""]')?.content || '';
+                                const mAndroid = document.querySelector('meta[property=""al:android:url""]')?.content || '';
+                                const canonical = document.querySelector('link[rel=""canonical""]')?.href || '';
+                                if (mId === id || mAndroid.includes(id) || canonical.includes(id)) return true;
+
+                                if (window.require) {{
+                                    const cuid = window.require('CurrentUserInitialData');
+                                    if (cuid && (cuid.ACCOUNT_ID === id || cuid.USER_ID === id)) return true;
+                                }}
+                                const headerLinks = Array.from(document.querySelectorAll('div[role=""banner""] a[href], div[role=""navigation""] a[href]'));
+                                for (const l of headerLinks) {{
+                                    if ((l.getAttribute('href') || '').includes(id)) return true;
+                                }}
+                            }} catch {{}}
+                            return false;
+                        }}
+                    ").ConfigureAwait(false);
+
+                    if (metaMatch)
+                    {
+                        signal1Satisfied = true;
+                        signal1Details = $"Active Page identity verified via metadata / data-layer for Page ID '{expectedPageId}'.";
                     }
                 }
             }

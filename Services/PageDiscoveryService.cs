@@ -80,9 +80,27 @@ namespace ViaManager.Services
                                 }
                             }
 
-                            if (pageId && !seenIds.has(pageId)) {
-                                seenIds.add(pageId);
-                                results.push({ id: pageId, name: text || pageId });
+                            if (pageId) {
+                                let nameCandidate = text;
+                                if (!nameCandidate || nameCandidate === 'Chuyển' || nameCandidate === 'Switch' || nameCandidate === 'Xem' || nameCandidate === 'View' || /^\d+$/.test(nameCandidate)) {
+                                    const card = a.closest('div[role=\'listitem\'], div[role=\'article\'], div[data-visualcompletion]');
+                                    if (card) {
+                                        const h = card.querySelector('span[dir=\'auto\'], strong, h2');
+                                        if (h && h.innerText && h.innerText.trim()) {
+                                            nameCandidate = h.innerText.trim();
+                                        }
+                                    }
+                                }
+
+                                if (!seenIds.has(pageId)) {
+                                    seenIds.add(pageId);
+                                    results.push({ id: pageId, name: nameCandidate || pageId });
+                                } else if (nameCandidate && nameCandidate !== pageId && !/^\d+$/.test(nameCandidate)) {
+                                    const existing = results.find(r => r.id === pageId);
+                                    if (existing && (/^\d+$/.test(existing.name) || !existing.name)) {
+                                        existing.name = nameCandidate;
+                                    }
+                                }
                             }
                         }
 

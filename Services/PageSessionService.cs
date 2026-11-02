@@ -89,6 +89,24 @@ namespace ViaManager.Services
                         continue;
                     }
 
+                    // Try to resolve human-readable page name from title or h1 if still numeric
+                    if (System.Text.RegularExpressions.Regex.IsMatch(candidate.Name, @"^\d+$"))
+                    {
+                        try
+                        {
+                            string docTitle = await page.TitleAsync().ConfigureAwait(false) ?? "";
+                            if (docTitle.Contains('|'))
+                            {
+                                string cleanName = docTitle.Split('|')[0].Trim();
+                                if (!string.IsNullOrWhiteSpace(cleanName) && !cleanName.Equals("Facebook", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    candidate = candidate with { Name = cleanName };
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
                     // Step B: Polling & Two-Signal Verification
                     // Check up to 5 times with 1.5s delay to allow Facebook context to settle
                     VerificationResult? verificationResult = null;
