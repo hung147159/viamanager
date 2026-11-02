@@ -1232,7 +1232,11 @@ public partial class Form1 : Form
                     delCmd.Parameters.AddWithValue("$oldId", oldId);
                     delCmd.ExecuteNonQuery();
 
-                    AccountRepository.ReleaseAssignedPages(_connectionString, oldId);
+                    using var delPagesCmd = conn.CreateCommand();
+                    delPagesCmd.Transaction = transaction;
+                    delPagesCmd.CommandText = "DELETE FROM AssignedPages WHERE Via_UID = $oldId";
+                    delPagesCmd.Parameters.AddWithValue("$oldId", oldId);
+                    delPagesCmd.ExecuteNonQuery();
                 }
 
                 string pass = row.Cells["PASS"].Value?.ToString()?.Trim() ?? "";
@@ -1311,28 +1315,51 @@ public partial class Form1 : Form
 
     private void btnDelete_Click(object? sender, EventArgs e)
     {
-        var rowsToDelete = new List<DataGridViewRow>();
+        var selectedRows = new List<DataGridViewRow>();
 
         foreach (DataGridViewRow row in dgvAccounts.SelectedRows)
         {
             if (!row.IsNewRow)
-                rowsToDelete.Add(row);
+                selectedRows.Add(row);
         }
 
-        if (rowsToDelete.Count == 0 && dgvAccounts.CurrentRow != null && !dgvAccounts.CurrentRow.IsNewRow)
+        if (selectedRows.Count == 0 && dgvAccounts.CurrentRow != null && !dgvAccounts.CurrentRow.IsNewRow)
         {
-            rowsToDelete.Add(dgvAccounts.CurrentRow);
+            selectedRows.Add(dgvAccounts.CurrentRow);
         }
 
-        if (rowsToDelete.Count == 0)
+        if (selectedRows.Count == 0)
         {
             MessageBox.Show("Vui lòng chọn ít nhất một dòng để xóa.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
+        // RÀNG BUỘC: Chỉ tài khoản có trạng thái 'die' mới được phép xóa
+        var nonDieRows = selectedRows.Where(r =>
+        {
+            string status = r.Cells["TrangThai"].Value?.ToString()?.Trim() ?? "";
+            return !status.Equals("die", StringComparison.OrdinalIgnoreCase);
+        }).ToList();
+
+        if (nonDieRows.Count > 0)
+        {
+            var nonDieIds = nonDieRows.Select(r => r.Cells["ID"].Value?.ToString() ?? "").Where(s => !string.IsNullOrEmpty(s)).Take(5).ToList();
+            string idsSample = string.Join(", ", nonDieIds);
+            MessageBox.Show(
+                $"Ràng buộc an toàn: Chỉ những tài khoản có trạng thái 'die' mới được phép xóa!\n\n" +
+                $"Phát hiện {nonDieRows.Count} tài khoản được chọn đang có trạng thái khác 'die' (Ví dụ: {idsSample}).\n" +
+                $"Vui lòng chỉ chọn các dòng có trạng thái 'die' để xóa.",
+                "Cảnh báo ràng buộc xóa",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var rowsToDelete = selectedRows;
+
         var confirm = MessageBox.Show(
-            $"Bạn có chắc chắn muốn xóa {rowsToDelete.Count} dòng đã chọn khỏi bảng và SQLite không?",
-            "Xác nhận xóa",
+            $"Bạn có chắc chắn muốn xóa {rowsToDelete.Count} tài khoản 'die' đã chọn khỏi cơ sở dữ liệu và bảng không?",
+            "Xác nhận xóa tài khoản die",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
 
@@ -1341,30 +1368,52 @@ public partial class Form1 : Form
 
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
+
+        using (var pragmaCmd = conn.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 15000;";
+            pragmaCmd.ExecuteNonQuery();
+        }
+
         using var transaction = conn.BeginTransaction();
 
         try
         {
+            using var cmdAssigned = conn.CreateCommand();
+            cmdAssigned.Transaction = transaction;
+            cmdAssigned.CommandText = "DELETE FROM AssignedPages WHERE Via_UID = $id;";
+            var pAssignedId = cmdAssigned.Parameters.Add("$id", SqliteType.Text);
+
+            using var cmdAccount = conn.CreateCommand();
+            cmdAccount.Transaction = transaction;
+            cmdAccount.CommandText = "DELETE FROM Accounts WHERE ID = $id;";
+            var pAccountId = cmdAccount.Parameters.Add("$id", SqliteType.Text);
+
+            int deletedCount = 0;
             foreach (var row in rowsToDelete)
             {
                 string id = (row.Tag as string) ?? row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
                 if (!string.IsNullOrEmpty(id))
                 {
-                    using var cmd = conn.CreateCommand();
-                    cmd.Transaction = transaction;
-                    cmd.CommandText = "DELETE FROM Accounts WHERE ID = $id";
-                    cmd.Parameters.AddWithValue("$id", id);
-                    cmd.ExecuteNonQuery();
+                    pAssignedId.Value = id;
+                    cmdAssigned.ExecuteNonQuery();
 
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
+                    pAccountId.Value = id;
+                    cmdAccount.ExecuteNonQuery();
+
+                    deletedCount++;
                 }
-                dgvAccounts.Rows.Remove(row);
             }
 
             transaction.Commit();
-            statusLabel.Text = $"Đã xóa {rowsToDelete.Count} dòng.";
+
+            statusLabel.Text = $"Đã xóa {deletedCount} tài khoản 'die'.";
             UpdateCountLabels();
             LoadAccountsFromDb(txtSearch.Text);
+            UpdateDynamicThreadCount();
+
+            MessageBox.Show($"Đã xóa thành công {deletedCount} tài khoản 'die' khỏi SQLite!",
+                "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
