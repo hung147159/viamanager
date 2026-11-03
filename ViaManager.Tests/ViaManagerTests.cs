@@ -407,5 +407,60 @@ namespace ViaManager.Tests
             Assert.Contains("xs=12%3Agcl9r68lp-eRwQ%3A2%3A1792327189%3A-1%3A-1%3A%3AAc2hxpAX2B7R5d6gGVNqaGYDtHLTYiCWhJpkDUS5fQpy", headerCookie);
             Assert.EndsWith("wd=932x730", headerCookie);
         }
+
+        // =========================================================================
+        // TEST 11: PageSwitchService filter rejects root menu items and accepts valid page items
+        // =========================================================================
+        [Fact]
+        public void PageSwitchService_FilterRejectsRootMenuItems_AndAcceptsValidPages()
+        {
+            // Arrange
+            var switchService = new PageSwitchService();
+
+            // Root menu items / system buttons that must be REJECTED:
+            var invalidItems = new[]
+            {
+                "Cài đặt & quyền riêng tư",
+                "Trợ giúp & hỗ trợ",
+                "Màn hình & trợ năng",
+                "Đóng góp ý kiến",
+                "Đăng xuất",
+                "Log out",
+                "Settings & privacy",
+                "Help & support",
+                "Xem tất cả trang cá nhân",
+                "See all profiles",
+                "Xem tất cả các trang cá nhân",
+                "1234567890",
+                "Tất cả thông báo\nĐánh dấu là đã đọc",
+                "Thông báo trước đó\nNguyễn Văn A đã thích bài viết của bạn",
+                "",
+                "   "
+            };
+
+            foreach (var item in invalidItems)
+            {
+                Assert.False(switchService.IsValidPageItem(item), $"Item '{item}' should have been rejected as invalid/spam/root-menu.");
+            }
+
+            // Valid page items that must be ACCEPTED:
+            var validPages = new[]
+            {
+                "Thời Trang Công Sở Nữ",
+                "Bất Động Sản Hà Nội 24h",
+                "Cửa Hàng Phụ Kiện Zin",
+                "Agency Digital Marketing",
+                "Page Bán Hàng Online\nChuyển sang trang cá nhân này để thực hiện hành động"
+            };
+
+            foreach (var pageName in validPages)
+            {
+                Assert.True(switchService.IsValidPageItem(pageName), $"Page '{pageName}' should have been accepted.");
+            }
+
+            // Verify clean name extraction
+            Assert.Equal("Page Bán Hàng Online", switchService.ExtractCleanPageName("Page Bán Hàng Online\nChuyển sang trang cá nhân này để thực hiện hành động"));
+            Assert.Equal("Thời Trang Nam", switchService.ExtractCleanPageName("  Thời Trang Nam  \r\nSubline info"));
+        }
     }
 }

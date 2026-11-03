@@ -96,9 +96,9 @@ namespace ViaManager.Services
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         await page.EvaluateAsync(@"() => {
-                            let dialogs = document.querySelectorAll('div[role=""dialog""]');
-                            if (dialogs.length > 0) {
-                                let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                            let dialogs = Array.from(document.querySelectorAll('div[role=""dialog""]')).filter(d => d.offsetWidth > 0 && d.offsetHeight > 0);
+                            for (let d of dialogs) {
+                                let scrollers = d.querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
                                 for (let s of scrollers) s.scrollTop = s.scrollHeight;
                             }
                         }").ConfigureAwait(false);
@@ -106,9 +106,9 @@ namespace ViaManager.Services
                     }
 
                     await page.EvaluateAsync(@"() => {
-                        let dialogs = document.querySelectorAll('div[role=""dialog""]');
-                        if (dialogs.length > 0) {
-                            let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                        let dialogs = Array.from(document.querySelectorAll('div[role=""dialog""]')).filter(d => d.offsetWidth > 0 && d.offsetHeight > 0);
+                        for (let d of dialogs) {
+                            let scrollers = d.querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
                             for (let s of scrollers) s.scrollTop = 0;
                         }
                     }").ConfigureAwait(false);
@@ -155,17 +155,17 @@ namespace ViaManager.Services
                                     }
 
                                     await page.EvaluateAsync(@"() => {
-                                        let dialogs = document.querySelectorAll('div[role=""dialog""]');
-                                        if (dialogs.length > 0) {
-                                            let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                                        let dialogs = Array.from(document.querySelectorAll('div[role=""dialog""]')).filter(d => d.offsetWidth > 0 && d.offsetHeight > 0);
+                                        for (let d of dialogs) {
+                                            let scrollers = d.querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
                                             for (let s of scrollers) s.scrollTop = s.scrollHeight;
                                         }
                                     }").ConfigureAwait(false);
                                     await Task.Delay(600, cancellationToken).ConfigureAwait(false);
                                     await page.EvaluateAsync(@"() => {
-                                        let dialogs = document.querySelectorAll('div[role=""dialog""]');
-                                        if (dialogs.length > 0) {
-                                            let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                                        let dialogs = Array.from(document.querySelectorAll('div[role=""dialog""]')).filter(d => d.offsetWidth > 0 && d.offsetHeight > 0);
+                                        for (let d of dialogs) {
+                                            let scrollers = d.querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
                                             for (let s of scrollers) s.scrollTop = 0;
                                         }
                                     }").ConfigureAwait(false);
