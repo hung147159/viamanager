@@ -60,11 +60,15 @@ namespace ViaManager.Services
                 var playwright = await Playwright.CreateAsync().ConfigureAwait(false);
 
                 // Configure arguments safely. Insecure flags are excluded by default for security.
+                // Bổ sung các cờ tối ưu hóa cache để giới hạn dung lượng lưu trữ rác Chromium
                 var args = new System.Collections.Generic.List<string>
                 {
                     "--disable-blink-features=AutomationControlled",
                     "--disable-notifications",
-                    "--disable-infobars"
+                    "--disable-infobars",
+                    "--disk-cache-size=1",
+                    "--media-cache-size=1",
+                    "--disable-component-update"
                 };
 
                 if (_allowInsecureFlags)
@@ -161,8 +165,84 @@ namespace ViaManager.Services
                     try { _playwright.Dispose(); } catch { }
                     _lock.Release();
                     AppLogger.Debug("BrowserProfileService", $"Released profile lock for UID {_viaUid}");
+
+                    // [NHIỆM VỤ 2 - THỜI ĐIỂM 1]: Dọn rác cache ngay sau khi đóng context & giải phóng lock
+                    try
+                    {
+                        CleanProfileCache(_profilePath);
+                    }
+                    catch { }
                 }
             }
+        }
+
+        /// <summary>
+        /// Dọn dẹp các thư mục rác / cache của Chromium bên trong profile để giải phóng dung lượng,
+        /// TUYỆT ĐỐI BẢO TOÀN các thư mục phiên làm việc và cookie (Network, Local Storage, Session Storage, IndexedDB, Preferences, Local State).
+        /// </summary>
+        public static void CleanProfileCache(string profileDir)
+        {
+            if (string.IsNullOrWhiteSpace(profileDir) || !Directory.Exists(profileDir))
+                return;
+
+            string[] targetSubPaths = new[]
+            {
+                Path.Combine("Default", "Cache"),
+                Path.Combine("Default", "Code Cache"),
+                Path.Combine("Default", "GPUCache"),
+                Path.Combine("Default", "DawnCache"),
+                Path.Combine("Default", "DawnGraphiteCache"),
+                Path.Combine("Default", "DawnWebGPUCache"),
+                Path.Combine("Default", "Service Worker", "CacheStorage"),
+                Path.Combine("Default", "Service Worker", "ScriptCache"),
+                "GrShaderCache",
+                "ShaderCache",
+                "GraphiteDawnCache",
+                "Crashpad",
+                "BrowserMetrics",
+                "OptimizationGuidePredictionModels",
+                "OptimizationGuideModelsManifest",
+                "Safe Browsing",
+                "component_crx_cache"
+            };
+
+            foreach (var subPath in targetSubPaths)
+            {
+                try
+                {
+                    string fullPath = Path.Combine(profileDir, subPath);
+                    if (Directory.Exists(fullPath))
+                    {
+                        Directory.Delete(fullPath, true);
+                    }
+                }
+                catch
+                {
+                    // Bỏ qua nếu file/thư mục đang bị Chromium hoặc tiến trình khác bận
+                }
+            }
+        }
+
+        /// <summary>
+        /// Quét qua toàn bộ các profile trong thư mục BrowserProfiles và dọn dẹp các file cache rác
+        /// </summary>
+        public static void CleanAllProfilesCache(string? baseDir = null)
+        {
+            try
+            {
+                string targetDir = string.IsNullOrWhiteSpace(baseDir)
+                    ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserProfiles")
+                    : baseDir;
+
+                if (Directory.Exists(targetDir))
+                {
+                    foreach (var dir in Directory.GetDirectories(targetDir))
+                    {
+                        CleanProfileCache(dir);
+                    }
+                }
+            }
+            catch { }
         }
     }
 }

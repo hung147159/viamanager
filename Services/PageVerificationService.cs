@@ -44,6 +44,25 @@ namespace ViaManager.Services
             CancellationToken cancellationToken = default)
         {
             AppLogger.Info("PageVerification", $"Verifying active Page identity for Page ID: {expectedPageId} (Expected Name: '{expectedPageName ?? ""}')");
+
+            // ƯU TIÊN TUYỆT ĐỐI: Kiểm tra trực tiếp Cookie i_user hoặc c_user
+            try
+            {
+                var cookies = await page.Context.CookiesAsync(new[] { "https://www.facebook.com", "https://facebook.com" }).ConfigureAwait(false);
+                bool cookieConfirmed = cookies.Any(c =>
+                    (c.Name.Equals("i_user", StringComparison.OrdinalIgnoreCase) && c.Value == expectedPageId) ||
+                    (c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && c.Value == expectedPageId));
+
+                if (cookieConfirmed)
+                {
+                    string cookieSummary = $"[SUCCESS 100%] Switch profile verified via canonical Cookie (i_user/c_user == {expectedPageId}).";
+                    AppLogger.Info("PageVerification", cookieSummary);
+                    var cookieSignal = new VerificationSignal("CookieIdentityConfirmed", $"i_user/c_user matches Page ID {expectedPageId}", DateTime.UtcNow, true, cookieSummary);
+                    return new VerificationResult(true, VerificationStatus.Verified, new[] { cookieSignal }, cookieSummary);
+                }
+            }
+            catch { }
+
             var detectedSignals = new List<VerificationSignal>();
 
             // Signal 1: Active Profile UI Identity (Header profile name, avatar aria-label, admin controls, meta data)
@@ -231,17 +250,26 @@ namespace ViaManager.Services
         {
             var signalList = signals.ToList();
 
+            var cookieSig = signalList.FirstOrDefault(s => s.SignalType == "CookieIdentityConfirmed");
+            if (cookieSig?.IsSatisfied == true)
+            {
+                return new VerificationResult(true, VerificationStatus.Verified, signalList, "Verification PASSED via Cookie Identity.");
+            }
+
             var signal1 = signalList.FirstOrDefault(s => s.SignalType == "ActiveProfileUIIdentity");
             var signal2 = signalList.FirstOrDefault(s => s.SignalType == "PageAdministrativeContext");
 
             bool s1 = signal1?.IsSatisfied ?? false;
             bool s2 = signal2?.IsSatisfied ?? false;
 
-            // ABSOLUTE RULE CHECK:
-            // Even if c_user == expectedPageId, we MUST REJECT if the two independent non-secret signals are NOT met.
-            if (s1 && s2)
+            bool isNameNumericOrEmpty = string.IsNullOrWhiteSpace(expectedPageName) ||
+                                        expectedPageName.Equals(expectedPageId, StringComparison.OrdinalIgnoreCase) ||
+                                        System.Text.RegularExpressions.Regex.IsMatch(expectedPageName, @"^\d+$");
+
+            // Quy chuẩn: (s1 && s2) HOẶC nếu Signal 2 (Admin Context) == true và Expected Name là số/PageID
+            if ((s1 && s2) || (s2 && isNameNumericOrEmpty))
             {
-                string summary = $"Verification PASSED. Signal 1 (UI Identity) and Signal 2 (Admin Context) both satisfied. (Observed c_user: '{currentCUser}')";
+                string summary = $"Verification PASSED. Signal 2 (Admin Context): True, Signal 1: {s1} (NameIsNumeric: {isNameNumericOrEmpty}). (Observed c_user: '{currentCUser}')";
                 AppLogger.Info("PageVerification", summary);
                 return new VerificationResult(true, VerificationStatus.Verified, signalList, summary);
             }

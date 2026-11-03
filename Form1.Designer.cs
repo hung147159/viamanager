@@ -9,15 +9,13 @@ partial class Form1
     private Button btnPasteSheet = null!;
     private Button btnSave = null!;
     private Button btnDelete = null!;
-    private Button btnGetCookie = null!;
-    private Button btnScanTotalPages = null!;
-    private Button btnCampaign = null!;
     private Button btnReload = null!;
     private TextBox txtSearch = null!;
     private Label lblSearch = null!;
     private StatusStrip statusStrip = null!;
     private ToolStripStatusLabel statusLabel = null!;
     private ToolStripStatusLabel countLabel = null!;
+    private CheckBox chkOnlyLogin = null!;
 
     private DataGridViewButtonColumn colBtnRun = null!;
     private DataGridViewTextBoxColumn colID = null!;
@@ -51,10 +49,8 @@ partial class Form1
         this.btnPasteSheet = new Button();
         this.btnSave = new Button();
         this.btnDelete = new Button();
-        this.btnGetCookie = new Button();
-        this.btnScanTotalPages = new Button();
-        this.btnCampaign = new Button();
         this.btnReload = new Button();
+        this.chkOnlyLogin = new CheckBox();
         this.txtSearch = new TextBox();
         this.lblSearch = new Label();
 
@@ -93,10 +89,8 @@ partial class Form1
         this.panelTop.Controls.Add(this.btnPasteSheet);
         this.panelTop.Controls.Add(this.btnSave);
         this.panelTop.Controls.Add(this.btnDelete);
-        this.panelTop.Controls.Add(this.btnGetCookie);
-        this.panelTop.Controls.Add(this.btnScanTotalPages);
-        this.panelTop.Controls.Add(this.btnCampaign);
         this.panelTop.Controls.Add(this.btnReload);
+        this.panelTop.Controls.Add(this.chkOnlyLogin);
         this.panelTop.Controls.Add(this.txtSearch);
         this.panelTop.Controls.Add(this.lblSearch);
         this.panelTop.Dock = DockStyle.Top;
@@ -164,51 +158,6 @@ partial class Form1
         this.btnDelete.Click += new EventHandler(this.btnDelete_Click);
 
         // 
-        // btnGetCookie
-        // 
-        this.btnGetCookie.BackColor = Color.FromArgb(126, 34, 206);
-        this.btnGetCookie.FlatAppearance.BorderSize = 0;
-        this.btnGetCookie.FlatStyle = FlatStyle.Flat;
-        this.btnGetCookie.Font = new Font("Segoe UI", 9.25F, FontStyle.Bold);
-        this.btnGetCookie.ForeColor = Color.White;
-        this.btnGetCookie.Location = new Point(545, 10);
-        this.btnGetCookie.Size = new Size(130, 36);
-        this.btnGetCookie.Text = "🚀 Lấy Cookie";
-        this.btnGetCookie.UseVisualStyleBackColor = false;
-        this.btnGetCookie.Cursor = Cursors.Hand;
-        this.btnGetCookie.Click += new EventHandler(this.btnGetCookie_Click);
-
-        // 
-        // btnScanTotalPages
-        // 
-        this.btnScanTotalPages.BackColor = Color.FromArgb(13, 148, 136);
-        this.btnScanTotalPages.FlatAppearance.BorderSize = 0;
-        this.btnScanTotalPages.FlatStyle = FlatStyle.Flat;
-        this.btnScanTotalPages.Font = new Font("Segoe UI", 9.25F, FontStyle.Bold);
-        this.btnScanTotalPages.ForeColor = Color.White;
-        this.btnScanTotalPages.Location = new Point(685, 10);
-        this.btnScanTotalPages.Size = new Size(150, 36);
-        this.btnScanTotalPages.Text = "📊 Quét Tổng Page";
-        this.btnScanTotalPages.UseVisualStyleBackColor = false;
-        this.btnScanTotalPages.Cursor = Cursors.Hand;
-        this.btnScanTotalPages.Click += new EventHandler(this.btnScanTotalPages_Click);
-
-        // 
-        // btnCampaign
-        // 
-        this.btnCampaign.BackColor = Color.FromArgb(217, 119, 6);
-        this.btnCampaign.FlatAppearance.BorderSize = 0;
-        this.btnCampaign.FlatStyle = FlatStyle.Flat;
-        this.btnCampaign.Font = new Font("Segoe UI", 9.25F, FontStyle.Bold);
-        this.btnCampaign.ForeColor = Color.White;
-        this.btnCampaign.Location = new Point(845, 10);
-        this.btnCampaign.Size = new Size(155, 36);
-        this.btnCampaign.Text = "Chạy 0 Luồng";
-        this.btnCampaign.UseVisualStyleBackColor = false;
-        this.btnCampaign.Cursor = Cursors.Hand;
-        this.btnCampaign.Click += new EventHandler(this.btnCampaign_Click);
-
-        // 
         // btnReload
         // 
         this.btnReload.BackColor = Color.FromArgb(71, 85, 105);
@@ -216,12 +165,27 @@ partial class Form1
         this.btnReload.FlatStyle = FlatStyle.Flat;
         this.btnReload.Font = new Font("Segoe UI", 9.25F, FontStyle.Bold);
         this.btnReload.ForeColor = Color.White;
-        this.btnReload.Location = new Point(1010, 10);
+        this.btnReload.Location = new Point(550, 10);
         this.btnReload.Size = new Size(85, 36);
         this.btnReload.Text = "🔄 Tải lại";
         this.btnReload.UseVisualStyleBackColor = false;
         this.btnReload.Cursor = Cursors.Hand;
         this.btnReload.Click += new EventHandler(this.btnReload_Click);
+
+        // 
+        // chkOnlyLogin
+        // 
+        this.chkOnlyLogin.AutoSize = true;
+        this.chkOnlyLogin.Cursor = Cursors.Hand;
+        this.chkOnlyLogin.Font = new Font("Segoe UI", 9.25F, FontStyle.Bold);
+        this.chkOnlyLogin.ForeColor = Color.FromArgb(194, 65, 12);
+        this.chkOnlyLogin.Location = new Point(650, 17);
+        this.chkOnlyLogin.Name = "chkOnlyLogin";
+        this.chkOnlyLogin.Size = new Size(175, 21);
+        this.chkOnlyLogin.TabIndex = 9;
+        this.chkOnlyLogin.Text = "🔒 Chỉ Login (Treo Acc)";
+        this.chkOnlyLogin.UseVisualStyleBackColor = true;
+        this.chkOnlyLogin.CheckedChanged += new EventHandler(this.chkOnlyLogin_CheckedChanged);
 
         // 
         // lblSearch

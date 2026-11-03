@@ -10,24 +10,61 @@ namespace ViaManager.Utilities
     {
         /// <summary>
         /// Serializes browser cookies returned directly from Playwright BrowserContext.CookiesAsync()
-        /// VERBATIM with ZERO MUTATION. Absolute Rule: Never fake, mutate, synthesize, or infer cookies.
+        /// VERBATIM with ZERO MUTATION in canonical HTTP 'Cookie' header format.
+        /// Absolute Rule: Never fake, mutate, synthesize, or infer cookies.
+        /// Filters for Facebook domain cookies, deduplicates by name, and arranges in standard HTTP header layout.
         /// </summary>
         public static string SerializeVerbatim(IEnumerable<BrowserContextCookiesResult> cookies)
         {
             if (cookies == null)
                 return string.Empty;
 
-            var parts = new List<string>();
-            foreach (var cookie in cookies)
-            {
-                if (string.IsNullOrWhiteSpace(cookie.Name))
-                    continue;
+            // 1. Filter for Facebook cookies if domains are populated (exclude foreign tracking cookies)
+            var fbCookies = cookies
+                .Where(c => !string.IsNullOrWhiteSpace(c.Name) &&
+                            (string.IsNullOrEmpty(c.Domain) || c.Domain.Contains("facebook.com", StringComparison.OrdinalIgnoreCase)))
+                .ToList();
 
-                // Absolute fidelity: Exactly name=value returned by the browser session
-                parts.Add($"{cookie.Name.Trim()}={cookie.Value ?? string.Empty}");
+            var sourceList = fbCookies.Count > 0 ? fbCookies : cookies.Where(c => !string.IsNullOrWhiteSpace(c.Name)).ToList();
+
+            // 2. Deduplicate by Name (preserving first non-empty value, matching HTTP Cookie header specification)
+            var cookieDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in sourceList)
+            {
+                string name = c.Name.Trim();
+                string val = c.Value ?? string.Empty;
+
+                if (!cookieDict.ContainsKey(name) || (string.IsNullOrEmpty(cookieDict[name]) && !string.IsNullOrEmpty(val)))
+                {
+                    cookieDict[name] = val;
+                }
             }
 
-            return string.Join("; ", parts);
+            // 3. Canonical HTTP Cookie header order (standard Facebook session header layout: sb, datr, ps_l, ps_n, wl_cbv, c_user, i_user, dpr, presence, fr, xs, wd...)
+            var preferredOrder = new[]
+            {
+                "sb", "datr", "ps_l", "ps_n", "wl_cbv", "c_user", "i_user", "dpr", "presence", "fr", "xs", "wd"
+            };
+
+            var orderedParts = new List<string>();
+            var remainingKeys = new HashSet<string>(cookieDict.Keys, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in preferredOrder)
+            {
+                if (cookieDict.TryGetValue(key, out var val))
+                {
+                    orderedParts.Add($"{key}={val}");
+                    remainingKeys.Remove(key);
+                }
+            }
+
+            // Append any remaining Facebook cookies
+            foreach (var key in remainingKeys)
+            {
+                orderedParts.Add($"{key}={cookieDict[key]}");
+            }
+
+            return string.Join("; ", orderedParts);
         }
 
         /// <summary>

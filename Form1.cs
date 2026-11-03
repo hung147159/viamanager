@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using Microsoft.Playwright;
+using ViaManager.Utilities;
 
 namespace ViaManager;
 
@@ -22,8 +23,8 @@ public partial class Form1 : Form
     private readonly ViaManager.Services.IPageVerificationService _pageVerificationService;
     private readonly ViaManager.Services.IPageSessionService _pageSessionService;
 
-    // Khởi tạo điều phối đa luồng động (Dynamic Threading) theo tổng số Page quét được
-    private SemaphoreSlim _concurrencySemaphore = new SemaphoreSlim(1, 1);
+
+
 
     public Form1()
     {
@@ -40,7 +41,13 @@ public partial class Form1 : Form
         catch { }
 
         _dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ViaManager.db");
-        _connectionString = $"Data Source={_dbPath}";
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = _dbPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            DefaultTimeout = 30
+        };
+        _connectionString = csb.ToString();
 
         _accountRepository = new ViaManager.Data.AccountRepository(_connectionString);
         _pageRepository = new ViaManager.Data.PageRepository(_connectionString);
@@ -67,6 +74,16 @@ public partial class Form1 : Form
             LoadAccountsFromDb();
             // Cập nhật số luồng động ngay khi mở phần mềm
             UpdateDynamicThreadCount();
+
+            // [NHIỆM VỤ 2 - THỜI ĐIỂM 2]: Chạy ngầm dọn rác toàn bộ BrowserProfiles khi mở ứng dụng
+            Task.Run(() =>
+            {
+                try
+                {
+                    ViaManager.Services.BrowserProfileService.CleanAllProfilesCache();
+                }
+                catch { }
+            });
         }
         catch (Exception ex)
         {
@@ -75,7 +92,7 @@ public partial class Form1 : Form
     }
 
     // ==========================================
-    // 1. HÀM TÍNH TỔNG LUỒNG & CẬP NHẬT GIAO DIỆN (UI)
+    // 1. HÀM TÍNH TỔNG LUỒNG
     // ==========================================
     public int UpdateDynamicThreadCount()
     {
@@ -87,13 +104,11 @@ public partial class Form1 : Form
         try
         {
             int totalPageCount = AccountRepository.GetTotalPageCount(_connectionString);
-            btnCampaign.Text = $"Chạy {totalPageCount} Luồng";
             return totalPageCount;
         }
         catch
         {
             int fallback = GlobalState.ProcessedPageIds.Count;
-            btnCampaign.Text = $"Chạy {fallback} Luồng";
             return fallback;
         }
     }
@@ -253,6 +268,12 @@ public partial class Form1 : Form
 
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
+
+        using (var pragmaCmd = conn.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 15000;";
+            pragmaCmd.ExecuteNonQuery();
+        }
 
         using var cmd = conn.CreateCommand();
         if (string.IsNullOrWhiteSpace(searchFilter))
@@ -417,6 +438,47 @@ public partial class Form1 : Form
         }
     }
 
+    private void chkOnlyLogin_CheckedChanged(object? sender, EventArgs e)
+    {
+        if (chkOnlyLogin.Checked)
+        {
+            statusLabel.Text = "Chế độ hiện tại: [CHỈ LOGIN TREO ACC] - Bỏ qua tiến trình cào Cookie Page.";
+            LogConsole("SYSTEM", "Đã chuyển sang chế độ: [CHỈ LOGIN TREO ACC] - Bỏ qua cào Cookie Page.");
+        }
+        else
+        {
+            statusLabel.Text = "Chế độ hiện tại: [CHẠY FULL] - Tự động login, quét và lấy Cookie Page.";
+            LogConsole("SYSTEM", "Đã chuyển sang chế độ: [CHẠY FULL] - Tự động quét và lấy Cookie Page.");
+        }
+    }
+
+    private static async Task SimulateNewsfeedInteractionAsync(IPage page)
+    {
+        try
+        {
+            // Cuộn nhẹ newsfeed bằng JS để Facebook kích hoạt nạp feed
+            await page.EvaluateAsync(@"() => {
+                window.scrollBy({ top: 300 + Math.floor(Math.random() * 200), behavior: 'smooth' });
+            }").ConfigureAwait(false);
+            await Task.Delay(1500).ConfigureAwait(false);
+
+            await page.EvaluateAsync(@"() => {
+                window.scrollBy({ top: 250 + Math.floor(Math.random() * 250), behavior: 'smooth' });
+            }").ConfigureAwait(false);
+            await Task.Delay(1200).ConfigureAwait(false);
+
+            // Cuộn ngược nhẹ mô phỏng người dùng đọc bài
+            await page.EvaluateAsync(@"() => {
+                window.scrollBy({ top: -150, behavior: 'smooth' });
+            }").ConfigureAwait(false);
+            await Task.Delay(800).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Bỏ qua lỗi nếu trang đang trong trạng thái reload
+        }
+    }
+
     private void dgvAccounts_CellContentClick(object? sender, DataGridViewCellEventArgs e)
     {
         if (e.RowIndex < 0 || e.ColumnIndex != colBtnRun.Index)
@@ -442,7 +504,7 @@ public partial class Form1 : Form
         }
 
         // Chạy đơn lẻ từ nút bấm cột 'Chạy' -> isHeadless: false để hiển thị trình duyệt Chrome
-        _ = RunViaProfileAsync(row, id, cookie, pass, ma2fa, bm, showDialog: true, isHeadless: false);
+        _ = RunViaProfileAsync(row, id, cookie, pass, ma2fa, bm, showDialog: true, isHeadless: false, isOnlyLogin: chkOnlyLogin.Checked);
     }
 
     private void dgvAccounts_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
@@ -461,18 +523,20 @@ public partial class Form1 : Form
             return;
 
         // Chạy thủ công từ click đúp dòng -> isHeadless: false để hiển thị trình duyệt Chrome
-        _ = RunViaProfileAsync(row, id, cookie, pass, ma2fa, bm, showDialog: true, isHeadless: false);
+        _ = RunViaProfileAsync(row, id, cookie, pass, ma2fa, bm, showDialog: true, isHeadless: false, isOnlyLogin: chkOnlyLogin.Checked);
     }
 
     // ==========================================
     // CẬP NHẬT HÀM CHẠY VIA (RunViaProfileAsync) THEO 3 YÊU CẦU CỐT LÕI
     // ==========================================
-    private async Task RunViaProfileAsync(DataGridViewRow row, string id, string rawCookie, string pass, string ma2fa, string bm, bool showDialog = false, bool isHeadless = true)
+    private async Task RunViaProfileAsync(DataGridViewRow row, string id, string rawCookie, string pass, string ma2fa, string bm, bool showDialog = false, bool isHeadless = true, bool isOnlyLogin = false)
     {
+        string initialStatus = GetRowStatus(row);
         SetRowStatus(row, id, "running");
         _accountRepository.UpdateAccountStatus(id, "running");
-        LogConsole(id, $"Bắt đầu chạy VIA. Trạng thái: running. Headless={isHeadless}");
-        UpdateStatusLabel($"UID: {id} - Đang khởi động trình duyệt...");
+        string modeLabel = isOnlyLogin ? "CHỈ LOGIN TREO ACC" : "CHẠY FULL";
+        LogConsole(id, $"Bắt đầu chạy VIA ({modeLabel}). Trạng thái: running. Headless={isHeadless}");
+        UpdateStatusLabel($"UID: {id} - Đang khởi động trình duyệt ({modeLabel})...");
 
         var account = new ViaManager.Models.ViaAccount
         {
@@ -481,28 +545,205 @@ public partial class Form1 : Form
             TwoFactorSecret = ma2fa,
             Cookie = rawCookie,
             BusinessManager = bm,
-            Status = "running"
+            Status = initialStatus
         };
 
         try
         {
             await using var session = await _browserProfileService.AcquireSessionAsync(id, isHeadless).ConfigureAwait(false);
 
-            var authResult = await _viaAuthService.EnsureAuthenticatedAsync(session, account).ConfigureAwait(false);
-            if (!authResult.IsSuccess)
+            var page = session.Page;
+            var context = session.Context;
+
+            // =========================================================================
+            // 1. BẢO TOÀN LOGIC LOGIN ĐÃ CÓ:
+            // - Mở URL https://www.facebook.com
+            // - Kiểm tra xem đã có phiên đăng nhập chưa
+            // - NẾU CHƯA: Chạy toàn bộ logic cũ (tiêm Cookie từ DataGridView, hoặc nhập Pass/2FA)
+            // - Xác nhận đăng nhập thành công (vào được bảng tin Newsfeed)
+            // =========================================================================
+            LogConsole(id, "Đang mở Facebook để kiểm tra phiên đăng nhập...");
+            UpdateStatusLabel($"UID: {id} - Đang kết nối Facebook...");
+            await page.GotoAsync("https://www.facebook.com", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 }).ConfigureAwait(false);
+            await Task.Delay(2500).ConfigureAwait(false);
+
+            var cookies = await context.CookiesAsync().ConfigureAwait(false);
+            bool hasCUser = cookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
+            string currentUrl = page.Url;
+            bool isCheckpoint = currentUrl.Contains("checkpoint", StringComparison.OrdinalIgnoreCase);
+            bool isLoginPage = currentUrl.Contains("/login", StringComparison.OrdinalIgnoreCase);
+            bool isLoggedIn = hasCUser && !isCheckpoint && !isLoginPage;
+
+            if (!isLoggedIn)
             {
-                string statusToSet = authResult.ErrorCode == "CHECKPOINT" ? "check" : "check";
-                SetRowStatus(row, id, statusToSet);
-                _accountRepository.UpdateAccountStatus(id, statusToSet);
+                // Bước 1A: Tiêm Cookie từ DataGridView nếu có
+                if (!string.IsNullOrWhiteSpace(rawCookie))
+                {
+                    LogConsole(id, "Chưa có phiên đăng nhập. Đang tiêm Cookie từ bảng tài khoản...");
+                    UpdateStatusLabel($"UID: {id} - Đang tiêm Cookie...");
+                    var cookieList = CookieHelper.ParseCookieString(rawCookie);
+                    if (cookieList.Count > 0)
+                    {
+                        await context.AddCookiesAsync(cookieList).ConfigureAwait(false);
+                        await page.GotoAsync("https://www.facebook.com", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 }).ConfigureAwait(false);
+                        await Task.Delay(3000).ConfigureAwait(false);
+
+                        cookies = await context.CookiesAsync().ConfigureAwait(false);
+                        hasCUser = cookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
+                        currentUrl = page.Url;
+                        isCheckpoint = currentUrl.Contains("checkpoint", StringComparison.OrdinalIgnoreCase);
+                        isLoginPage = currentUrl.Contains("/login", StringComparison.OrdinalIgnoreCase);
+                        isLoggedIn = hasCUser && !isCheckpoint && !isLoginPage;
+                    }
+                }
+
+                // Bước 1B: Nếu chưa đăng nhập được và có Pass -> Fallback nhập Pass & 2FA
+                if (!isLoggedIn && !string.IsNullOrWhiteSpace(pass))
+                {
+                    LogConsole(id, "Cookie không đăng nhập được. Tiến hành đăng nhập bằng UID / Mật khẩu...");
+                    UpdateStatusLabel($"UID: {id} - Đang đăng nhập bằng Pass...");
+
+                    if (!page.Url.Contains("/login", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await page.GotoAsync("https://www.facebook.com/login", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 30000 }).ConfigureAwait(false);
+                        await Task.Delay(2000).ConfigureAwait(false);
+                    }
+
+                    var emailInput = page.Locator("input[name='email'], #email");
+                    if (await emailInput.CountAsync().ConfigureAwait(false) > 0)
+                    {
+                        await emailInput.First.FillAsync(id).ConfigureAwait(false);
+                        await page.FillAsync("input[name='pass'], #pass", pass).ConfigureAwait(false);
+
+                        var loginBtn = page.Locator("button[name='login'], button[type='submit'], button:has-text('Đăng nhập'), button:has-text('Log In')");
+                        if (await loginBtn.CountAsync().ConfigureAwait(false) > 0)
+                            await loginBtn.First.ClickAsync().ConfigureAwait(false);
+                        else
+                            await page.Keyboard.PressAsync("Enter").ConfigureAwait(false);
+
+                        try
+                        {
+                            await page.WaitForURLAsync(u => u.Contains("checkpoint") || u.Contains("home") || u.Contains("two_factor") || u.Contains("login"), new() { Timeout = 15000 }).ConfigureAwait(false);
+                        }
+                        catch { }
+
+                        await Task.Delay(3000).ConfigureAwait(false);
+
+                        // Xử lý mã xác thực 2 bước (2FA)
+                        var otpInputs = page.Locator("input[name='approvals_code'], input[type='tel'], input[placeholder*='code'], input[placeholder*='mã']");
+                        if (await otpInputs.CountAsync().ConfigureAwait(false) > 0 && !string.IsNullOrWhiteSpace(ma2fa))
+                        {
+                            LogConsole(id, "Phát hiện xác thực 2 bước (2FA). Đang tạo mã OTP...");
+                            string otp = TotpGenerator.GenerateTotp(ma2fa);
+                            if (!string.IsNullOrEmpty(otp))
+                            {
+                                await otpInputs.First.FillAsync(otp).ConfigureAwait(false);
+                                var submitBtn = page.Locator("button[type='submit'], #checkpointSubmitButton, button[id*='checkpoint']");
+                                if (await submitBtn.CountAsync().ConfigureAwait(false) > 0)
+                                    await submitBtn.First.ClickAsync().ConfigureAwait(false);
+                                else
+                                    await page.Keyboard.PressAsync("Enter").ConfigureAwait(false);
+
+                                await Task.Delay(4000).ConfigureAwait(false);
+                            }
+                        }
+                    }
+
+                    cookies = await context.CookiesAsync().ConfigureAwait(false);
+                    hasCUser = cookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
+                    currentUrl = page.Url;
+                    isCheckpoint = currentUrl.Contains("checkpoint", StringComparison.OrdinalIgnoreCase);
+                    isLoginPage = currentUrl.Contains("/login", StringComparison.OrdinalIgnoreCase);
+                    isLoggedIn = hasCUser && !isCheckpoint && !isLoginPage;
+                }
+            }
+
+            // Kiểm tra Checkpoint
+            if (isCheckpoint || page.Url.Contains("checkpoint", StringComparison.OrdinalIgnoreCase))
+            {
+                SetRowStatus(row, id, "check");
+                _accountRepository.UpdateAccountStatus(id, "check");
                 _pageRepository.ReleaseAssignedPages(id);
-                LogConsole(id, $"[XÁC THỰC THẤT BẠI] {authResult.Message}");
-                UpdateStatusLabel($"UID: {id} - Xác thực thất bại: {authResult.Message}");
+                LogConsole(id, "[CHECKPOINT] Tài khoản bị Checkpoint.");
+                UpdateStatusLabel($"UID: {id} - Tài khoản bị Checkpoint!");
                 if (showDialog)
                 {
-                    this.Invoke(() => MessageBox.Show($"Xác thực thất bại cho UID {id}: {authResult.Message}", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+                    this.Invoke(() => MessageBox.Show($"Tài khoản UID {id} bị Checkpoint!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning));
                 }
                 return;
             }
+
+            // Kiểm tra đăng nhập thành công
+            if (!isLoggedIn)
+            {
+                SetRowStatus(row, id, "check");
+                _accountRepository.UpdateAccountStatus(id, "check");
+                LogConsole(id, "[XÁC THỰC THẤT BẠI] Không thể đăng nhập vào Facebook.");
+                UpdateStatusLabel($"UID: {id} - Đăng nhập thất bại.");
+                if (showDialog)
+                {
+                    this.Invoke(() => MessageBox.Show($"Không thể đăng nhập tài khoản UID {id}!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+                }
+                return;
+            }
+
+            // 4. Xác nhận đăng nhập thành công (vào được bảng tin Newsfeed)
+            LogConsole(id, "[ĐĂNG NHẬP THÀNH CÔNG] Đã vào bảng tin Newsfeed.");
+            UpdateStatusLabel($"UID: {id} - Đã đăng nhập thành công!");
+
+            // Cập nhật Cookie mới nhất chuẩn định dạng HTTP Header vào row và SQLite nếu có
+            var fbCookies = await context.CookiesAsync(new[] { "https://www.facebook.com", "https://facebook.com" }).ConfigureAwait(false);
+            if (fbCookies == null || fbCookies.Count == 0)
+            {
+                fbCookies = cookies;
+            }
+            string fullCookie = ViaManager.Utilities.CookieSerializer.SerializeVerbatim(fbCookies);
+            if (!string.IsNullOrEmpty(fullCookie))
+            {
+                SetRowCookie(row, fullCookie);
+                _accountRepository.UpdateAccountCookie(id, fullCookie);
+            }
+
+            // Cập nhật trạng thái 'live' khi đăng nhập thành công
+            SetRowStatus(row, id, "live");
+            _accountRepository.UpdateAccountStatus(id, "live");
+
+            // =========================================================================
+            // QUY TẮC RẼ NHÁNH: KHI VÀ CHỈ KHI BẬT CHẾ ĐỘ TREO ACC (isOnlyLogin == true)
+            // ĐỨNG IM 100% - TUYỆT ĐỐI CẤM CUỘN CHUỘT / KHÔNG TƯƠNG TÁC
+            // QUY TẮC: TUYỆT ĐỐI KHÔNG TỰ ĐỘNG ĐÓNG TRÌNH DUYỆT - KHÓA LUỒNG CHỜ NGƯỜI DÙNG TỰ ĐÓNG BẰNG TAY (DẤU 'X')
+            // Khi người dùng chọn [CHẠY FULL] (isOnlyLogin == false): Bỏ qua hoàn toàn, đi thẳng vào Newsfeed -> Quét Page -> Lấy Cookie!
+            // =========================================================================
+            if (isOnlyLogin)
+            {
+                string ruleName = "CHẾ ĐỘ TREO ACC";
+
+                Console.WriteLine($"[{id}] [{ruleName}] Đăng nhập thành công. QUY TẮC: Không tự động đóng trình duyệt, đứng im chờ người dùng tự thao tác...");
+                LogConsole(id, $"[{ruleName}] Đăng nhập thành công! QUY TẮC: Không tự động đóng trình duyệt, đứng im để bạn thao tác. Hãy bấm dấu 'X' trên Chrome khi bạn muốn kết thúc...");
+                UpdateStatusLabel($"UID: {id} - [{ruleName}] Đang mở trình duyệt. Không tự động đóng trình duyệt.");
+
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                page.Close += (_, _) => tcs.TrySetResult(true);
+                context.Close += (_, _) => tcs.TrySetResult(true);
+
+                try
+                {
+                    await tcs.Task.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Bỏ qua ngoại lệ khi người dùng đóng ngang cửa sổ Chrome
+                }
+
+                LogConsole(id, $"[{ruleName}] Người dùng đã đóng trình duyệt. Đang lưu phiên và hoàn tất.");
+                return; // Thoát ra khối finally để lưu dữ liệu an toàn
+            }
+
+            // =========================================================================
+            // CHẾ ĐỘ CHẠY FULL: MÔ PHỎNG TƯƠNG TÁC NGƯỜI THẬT TRÊN NEWSFEED & CÀO PAGE
+            // =========================================================================
+            LogConsole(id, "Đang mô phỏng tương tác người thật trên Newsfeed (Scroll & Hover)...");
+            await SimulateNewsfeedInteractionAsync(page).ConfigureAwait(false);
 
             var progressReporter = new Progress<string>(msg =>
             {
@@ -510,22 +751,329 @@ public partial class Form1 : Form
                 LogConsole(id, msg);
             });
 
-            var switchResults = await _pageSessionService.ProcessViaPagesAsync(session, account, progressReporter).ConfigureAwait(false);
+            // =========================================================================
+            // =========================================================================
+            // 4. QUÉT & SWITCH ĐỘNG TRỰC TIẾP TỪ MENU POPUP (BỎ QUA GOTO URL)
+            // =========================================================================
+            LogConsole(id, "Bắt đầu mở hộp thoại Switch Profile để quét và switch trực tiếp các Page...");
+            UpdateStatusLabel($"UID: {id} - Đang mở hộp thoại Switch Profile...");
 
-            int verifiedCount = switchResults.Count(r => r.IsSuccess);
+            // Đảm bảo đang ở trang chủ Facebook
+            if (!page.Url.StartsWith("https://www.facebook.com", StringComparison.OrdinalIgnoreCase) || page.Url.Contains("/pages/"))
+            {
+                await page.GotoAsync("https://www.facebook.com/", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 30000 }).ConfigureAwait(false);
+                await Task.Delay(2000).ConfigureAwait(false);
+            }
+
+            bool popupOpened = await OpenProfileSwitcherDialogAsync(page, id).ConfigureAwait(false);
+            if (popupOpened)
+            {
+                LogConsole(id, "Đang cuộn khung danh sách bên trong popup để tải toàn bộ Page (Lazy Load)...");
+                for (int scrollIdx = 0; scrollIdx < 5; scrollIdx++)
+                {
+                    await page.EvaluateAsync(@"() => {
+                        let dialogs = document.querySelectorAll('div[role=""dialog""]');
+                        if (dialogs.length > 0) {
+                            let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                            for (let s of scrollers) s.scrollTop = s.scrollHeight;
+                        }
+                    }").ConfigureAwait(false);
+                    await Task.Delay(800).ConfigureAwait(false);
+                }
+
+                // Đưa vị trí cuộn về đỉnh (top = 0) để bắt đầu duyệt từ các mục đầu tiên
+                await page.EvaluateAsync(@"() => {
+                    let dialogs = document.querySelectorAll('div[role=""dialog""]');
+                    if (dialogs.length > 0) {
+                        let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                        for (let s of scrollers) s.scrollTop = 0;
+                    }
+                }").ConfigureAwait(false);
+                await Task.Delay(500).ConfigureAwait(false);
+            }
+
+            var initialElements = popupOpened ? await GetDialogProfileElementsAsync(page).ConfigureAwait(false) : (IReadOnlyList<ILocator>)Array.Empty<ILocator>();
+            int totalElements = initialElements.Count;
+            LogConsole(id, $"[POPUP SCAN] Tìm thấy tổng cộng {totalElements} phần tử trong hộp thoại.");
+
+            var exportedCookies = new List<string>();
+            var capturedIUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var popupVerifiedPages = new List<ViaManager.Models.ManagedPage>();
+
+            // 1. THUẬT TOÁN CLICK ĐỘNG BÊN TRONG POPUP
+            // Nếu có phần tử (> 1 vì dòng đầu tiên là Via gốc)
+            if (totalElements > 1)
+            {
+                LogConsole(id, $"Bắt đầu Switch trực tiếp {totalElements - 1} Page từ bên trong menu Popup...");
+
+                for (int i = 1; i < totalElements; i++)
+                {
+                    LogConsole(id, $"=== Đang Switch Page thứ {i}/{totalElements - 1} ===");
+                    UpdateStatusLabel($"UID: {id} - Đang switch Page ({i}/{totalElements - 1})...");
+
+                    try
+                    {
+                        // a. Mỗi lần lặp i, phải MỞ LẠI hộp thoại (vì click vào 1 Page sẽ làm mất hộp thoại).
+                        if (i == 1)
+                        {
+                            var existingDialog = page.Locator("div[role='dialog']:visible");
+                            if (await existingDialog.CountAsync().ConfigureAwait(false) == 0)
+                            {
+                                await OpenProfileSwitcherDialogAsync(page, id).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            // Từ lượt i > 1 trở đi, do phiên đã chuyển sang Page cũ nên reset i_user để về Via gốc
+                            try
+                            {
+                                await context.ClearCookiesAsync(new BrowserContextClearCookiesOptions { Name = "i_user" }).ConfigureAwait(false);
+                            }
+                            catch { }
+
+                            await page.GotoAsync("https://www.facebook.com/", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 30000 }).ConfigureAwait(false);
+                            await Task.Delay(1500).ConfigureAwait(false);
+
+                            bool isDialogReady = await OpenProfileSwitcherDialogAsync(page, id).ConfigureAwait(false);
+                            if (!isDialogReady)
+                            {
+                                await page.GotoAsync("https://www.facebook.com/", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 30000 }).ConfigureAwait(false);
+                                await Task.Delay(1500).ConfigureAwait(false);
+                                isDialogReady = await OpenProfileSwitcherDialogAsync(page, id).ConfigureAwait(false);
+                            }
+
+                            if (!isDialogReady)
+                            {
+                                LogConsole(id, $"[CẢNH BÁO] Không thể mở lại hộp thoại ở lượt {i}. Bỏ qua lượt này.");
+                                continue;
+                            }
+
+                            // Cuộn lazy load nhanh để DOM tải đủ các phần tử
+                            await page.EvaluateAsync(@"() => {
+                                let dialogs = document.querySelectorAll('div[role=""dialog""]');
+                                if (dialogs.length > 0) {
+                                    let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                                    for (let s of scrollers) s.scrollTop = s.scrollHeight;
+                                }
+                            }").ConfigureAwait(false);
+                            await Task.Delay(600).ConfigureAwait(false);
+                            await page.EvaluateAsync(@"() => {
+                                let dialogs = document.querySelectorAll('div[role=""dialog""]');
+                                if (dialogs.length > 0) {
+                                    let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                                    for (let s of scrollers) s.scrollTop = 0;
+                                }
+                            }").ConfigureAwait(false);
+                            await Task.Delay(400).ConfigureAwait(false);
+                        }
+
+                        // b. Gọi lại pageElements = await page.Locator(...).AllAsync(); để cập nhật lại ElementHandle mới.
+                        var currentElements = await GetDialogProfileElementsAsync(page).ConfigureAwait(false);
+                        if (i >= currentElements.Count)
+                        {
+                            LogConsole(id, $"[CẢNH BÁO] Danh sách phần tử sau khi mở lại chỉ có {currentElements.Count}, không đủ chỉ số mục {i}. Bỏ qua.");
+                            continue;
+                        }
+
+                        var targetElement = currentElements[i];
+                        string rawText = "";
+                        try
+                        {
+                            rawText = (await targetElement.InnerTextAsync().ConfigureAwait(false) ?? "").Trim();
+                        }
+                        catch { }
+
+                        string targetPageName = ExtractCleanPageName(rawText);
+                        if (string.IsNullOrWhiteSpace(targetPageName))
+                        {
+                            targetPageName = $"Mục {i}";
+                        }
+
+                        // Log rõ quá trình bóc tách phần tử và text của nó trước khi click để dễ debug (Prompt mục IV)
+                        LogConsole(id, $"[POPUP ITEM {i}/{totalElements - 1}] Bóc tách: Name='{targetPageName}' | Text='{rawText.Replace("\r", " ").Replace("\n", " | ")}'");
+
+                        // Chặn text rác (Prompt mục III)
+                        if (!IsValidPageItem(rawText))
+                        {
+                            LogConsole(id, $"[BỎ QUA] Mục {i} ('{targetPageName}') chứa text rác hoặc thông báo. Bỏ qua.");
+                            continue;
+                        }
+
+                        // c. Bỏ qua phần tử đầu tiên (Via gốc). Click vào phần tử thứ i: await pageElements[i].ClickAsync();
+                        LogConsole(id, $"Đang bấm trực tiếp vào phần tử Page mục {i} ('{targetPageName}')...");
+                        try
+                        {
+                            await targetElement.ScrollIntoViewIfNeededAsync().ConfigureAwait(false);
+                            await Task.Delay(300).ConfigureAwait(false);
+
+                            var clickable = targetElement.Locator("div[role='radio']:visible, div[role='button']:visible").Nth(0);
+                            if (await clickable.CountAsync().ConfigureAwait(false) > 0)
+                            {
+                                await clickable.ClickAsync(new() { Timeout = 5000 }).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await targetElement.ClickAsync(new() { Timeout = 5000 }).ConfigureAwait(false);
+                            }
+                        }
+                        catch (Exception clickEx)
+                        {
+                            try
+                            {
+                                await targetElement.EvaluateAsync(@"(el) => {
+                                    const target = el.querySelector('div[role=""radio""], div[role=""button""]') || el;
+                                    target.click();
+                                }").ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                                LogConsole(id, $"[CẢNH BÁO] Không thể click vào phần tử mục {i}: {clickEx.Message}");
+                                continue;
+                            }
+                        }
+
+                        // Xử lý modal xác nhận chuyển nếu có ("Chuyển", "Switch", "Chuyển ngay", "Switch now")
+                        for (int cWait = 0; cWait < 5; cWait++)
+                        {
+                            await Task.Delay(600).ConfigureAwait(false);
+                            bool confirmClicked = await page.EvaluateAsync<bool>(@"() => {
+                                const dialogs = document.querySelectorAll('div[role=""dialog""]');
+                                for (let d = dialogs.length - 1; d >= 0; d--) {
+                                    const buttons = dialogs[d].querySelectorAll('div[role=""button""], button');
+                                    for (const btn of buttons) {
+                                        const t = (btn.innerText || '').trim();
+                                        if (/^(Chuyển|Switch|Chuyển ngay|Switch now)$/i.test(t)) {
+                                            btn.click();
+                                            return true;
+                                        }
+                                    }
+                                }
+                                return false;
+                            }").ConfigureAwait(false);
+
+                            if (confirmClicked)
+                            {
+                                LogConsole(id, "Đã bấm nút xác nhận 'Chuyển' trong dialog.");
+                                break;
+                            }
+                        }
+
+                        // d. Đợi trang load lại hoặc chờ context.CookiesAsync trả về cookie có chứa i_user
+                        string? newIUser = null;
+                        for (int poll = 0; poll < 15; poll++)
+                        {
+                            await Task.Delay(1000).ConfigureAwait(false);
+                            var currentCookies = await context.CookiesAsync(new[] { "https://www.facebook.com", "https://facebook.com" }).ConfigureAwait(false);
+                            var iUserCookie = currentCookies.FirstOrDefault(c => c.Name.Equals("i_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
+                            if (iUserCookie != null && !iUserCookie.Value.Equals(id, StringComparison.OrdinalIgnoreCase))
+                            {
+                                newIUser = iUserCookie.Value.Trim();
+                                break;
+                            }
+
+                            var cUserCookie = currentCookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
+                            if (cUserCookie != null && !cUserCookie.Value.Equals(id, StringComparison.OrdinalIgnoreCase))
+                            {
+                                newIUser = cUserCookie.Value.Trim();
+                                break;
+                            }
+                        }
+
+                        if (string.IsNullOrEmpty(newIUser))
+                        {
+                            LogConsole(id, $"[CẢNH BÁO] Không phát hiện cookie i_user/c_user Page mới sau khi click mục {i} ({targetPageName}).");
+                            continue;
+                        }
+
+                        // Chống trùng lặp tuyệt đối theo i_user
+                        if (capturedIUsers.Contains(newIUser))
+                        {
+                            LogConsole(id, $"[TRÙNG LẶP] Page {newIUser} đã lấy Cookie trước đó. Bỏ qua duplicate.");
+                            continue;
+                        }
+
+                        capturedIUsers.Add(newIUser);
+
+                        // Gọi hàm GetFormattedCookieStringAsync lấy chuỗi Cookie định dạng chuẩn và lưu kết quả
+                        string cookieString = await GetFormattedCookieStringAsync(context).ConfigureAwait(false);
+                        exportedCookies.Add(cookieString);
+
+                        popupVerifiedPages.Add(new ViaManager.Models.ManagedPage
+                        {
+                            PageId = newIUser,
+                            Name = !string.IsNullOrWhiteSpace(targetPageName) && !targetPageName.StartsWith("Mục ") ? targetPageName : newIUser,
+                            ParentViaUid = id,
+                            BusinessManager = bm,
+                            VerificationStatus = ViaManager.Models.VerificationStatus.Verified,
+                            VerifiedAt = DateTime.UtcNow,
+                            RawCookieSnapshot = cookieString
+                        });
+
+                        LogConsole(id, $"[SUCCESS] Đã switch thành công Page: {newIUser} ({targetPageName}) ({exportedCookies.Count}/{totalElements - 1}).");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogConsole(id, $"[LỖI] Lỗi khi xử lý mục {i}: {ex.Message}");
+                    }
+                }
+
+                if (popupVerifiedPages.Count > 0)
+                {
+                    _pageRepository.AssignPagesAtomic(bm, id, popupVerifiedPages);
+                }
+            }
+            else
+            {
+                LogConsole(id, $"[POPUP SCAN] Popup có {totalElements} phần tử (không đủ điều kiện switch). Chuyển sang quét trang /pages.");
+            }
+
+            // =========================================================================
+            // 2. CƠ CHẾ DỰ PHÒNG TẠI TRANG /PAGES (NẾU POPUP THẤT BẠI HOẶC 0 PAGE)
+            // =========================================================================
+            if (exportedCookies.Count == 0)
+            {
+                LogConsole(id, "[DỰ PHÒNG] Bắt đầu quét danh sách Page qua trang quản lý: https://www.facebook.com/pages/?category=your_pages ...");
+                UpdateStatusLabel($"UID: {id} - Đang quét dự phòng tại /pages...");
+
+                var fallbackPages = await ExtractManagedPageIdsAsync(page, id).ConfigureAwait(false);
+
+                // TUYỆT ĐỐI CHỈ lấy các ID thỏa mãn 2 điều kiện: Bắt đầu bằng 615... VÀ có độ dài 14-15 chữ số.
+                // (Các ID đầu 179... hoặc 12... ở trang /pages phải bị Regex gạt bỏ hoàn toàn).
+                var valid615Pages = fallbackPages
+                    .Where(pid => !string.IsNullOrWhiteSpace(pid))
+                    .Select(pid => pid.Trim())
+                    .Where(pid => pid.StartsWith("615") && (pid.Length == 14 || pid.Length == 15) && pid.All(char.IsDigit))
+                    .Where(pid => !pid.Equals(id, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                LogConsole(id, $"[KẾT QUẢ QUÉT /PAGES] Tìm thấy {valid615Pages.Count} Page Profile ID 615... chuẩn.");
+                foreach (var pageId in valid615Pages)
+                {
+                    Console.WriteLine($"[{id}] ---> Page ID (615...): {pageId}");
+                    LogConsole(id, $"---> Page ID (615...): {pageId}");
+                }
+
+                if (valid615Pages.Count > 0)
+                {
+                    UpdateStatusLabel($"UID: {id} - Tìm thấy {valid615Pages.Count} Page 615..., đang switch profile...");
+                    var switchResults = await _pageSessionService.ProcessViaPagesAsync(session, account, valid615Pages, progressReporter).ConfigureAwait(false);
+                    foreach (var r in switchResults.Where(r => r.IsSuccess && r.Snapshot != null))
+                    {
+                        exportedCookies.Add(r.Snapshot!.RawCookieHeader);
+                    }
+                }
+            }
+
+            int verifiedCount = exportedCookies.Count;
             SetRowPageCount(row, verifiedCount);
 
             SetRowStatus(row, id, "live");
             _accountRepository.UpdateAccountStatus(id, "live");
 
-            var exportedCookies = switchResults
-                .Where(r => r.IsSuccess && r.Snapshot != null)
-                .Select(r => $"{r.PageId} | {r.Snapshot!.RawCookieHeader}")
-                .ToList();
-
             if (exportedCookies.Count > 0)
             {
-                string firstCookie = switchResults.First(r => r.IsSuccess).Snapshot!.RawCookieHeader;
+                string firstCookie = exportedCookies.First();
                 SetRowCookie(row, firstCookie);
                 _accountRepository.UpdateAccountCookie(id, firstCookie);
 
@@ -538,6 +1086,10 @@ public partial class Form1 : Form
 
             LogConsole(id, $"Hoàn thành! Thu thập thành công {verifiedCount} Cookie Page hợp lệ.");
             UpdateStatusLabel($"UID: {id} - Hoàn tất! Đã lưu {verifiedCount} Page.");
+        }
+        catch (PlaywrightException pex) when (pex.Message.Contains("closed") || pex.Message.Contains("Target closed"))
+        {
+            LogConsole(id, "Cửa sổ trình duyệt đã được đóng.");
         }
         catch (PlaywrightException pex) when (pex.Message.Contains("ERR_NAME_NOT_RESOLVED"))
         {
@@ -578,12 +1130,275 @@ public partial class Form1 : Form
                 }
             }
             catch { }
+
+            // [NHIỆM VỤ 2 - THỜI ĐIỂM 1]: Dọn rác cache sau khi hoàn tất phiên chạy của Via
+            try
+            {
+                string profileDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserProfiles", id);
+                ViaManager.Services.BrowserProfileService.CleanProfileCache(profileDir);
+            }
+            catch { }
         }
     }
 
     // ==========================================
     // 3. LOGIC XOAY VÒNG & NGHỈ 2 TIẾNG (GetAvailableVias)
     // ==========================================
+    // Master Prompt Quy chuẩn 5: Hàm nối chuỗi Cookie chuẩn Header
+    private async Task<string> GetFormattedCookieStringAsync(IBrowserContext context)
+    {
+        var cookies = await context.CookiesAsync(new[] { "https://www.facebook.com" }).ConfigureAwait(false);
+        return string.Join("; ", cookies.Select(c => $"{c.Name}={c.Value}"));
+    }
+
+    private static bool IsValidPageItem(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        var trimmed = text.Trim();
+        if (trimmed.Length > 120) return false;
+
+        string lower = trimmed.ToLowerInvariant();
+        string[] spamKeywords = new[]
+        {
+            "chưa đọc", "đăng nhập", "bình luận", "cập nhật",
+            "thông báo trước đó", "tất cả thông báo", "unread", "comment",
+            "nhắc đến bạn", "thích bài viết", "bày tỏ cảm xúc", "đã thích",
+            "chia sẻ bài viết", "đã đăng", "vừa xong", "phút trước", "giờ trước",
+            "ngày trước", "hôm qua", "tuần trước",
+            "đánh dấu là đã đọc", "cài đặt thông báo",
+            "cài đặt & quyền riêng tư", "trợ giúp & hỗ trợ", "màn hình & trợ năng",
+            "đóng góp ý kiến", "đăng xuất", "log out",
+            "tạo trang", "create page", "quản lý trang",
+            "đóng", "close", "quay lại", "back"
+        };
+
+        foreach (var spam in spamKeywords)
+        {
+            if (lower.Contains(spam)) return false;
+        }
+
+        if (trimmed.All(char.IsDigit)) return false;
+
+        return true;
+    }
+
+    private static string ExtractCleanPageName(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(l => l.Trim())
+                        .Where(l => !string.IsNullOrEmpty(l))
+                        .ToList();
+        return lines.Count > 0 ? lines[0] : text.Trim();
+    }
+
+    private async Task<bool> OpenProfileSwitcherDialogAsync(IPage page, string viaUid)
+    {
+        try
+        {
+            // Đóng bất kỳ popup Thông báo / Tin nhắn / Menu rác nào nếu đang mở
+            var openDialogs = page.Locator("div[role='dialog']:visible");
+            if (await openDialogs.CountAsync().ConfigureAwait(false) > 0)
+            {
+                bool isNotification = await page.EvaluateAsync<bool>(@"() => {
+                    const dialogs = document.querySelectorAll('div[role=""dialog""]');
+                    for (const d of dialogs) {
+                        const txt = (d.innerText || '').toLowerCase();
+                        const aria = (d.getAttribute('aria-label') || '').toLowerCase();
+                        if (aria.includes('thông báo') || aria.includes('notification') || aria.includes('tin nhắn') || aria.includes('messenger')) return true;
+                        if (txt.includes('thông báo trước đó') || txt.includes('tất cả thông báo') || txt.includes('đánh dấu tất cả là đã đọc')) return true;
+                    }
+                    return false;
+                }").ConfigureAwait(false);
+
+                if (isNotification)
+                {
+                    await page.Keyboard.PressAsync("Escape").ConfigureAwait(false);
+                    await Task.Delay(500).ConfigureAwait(false);
+                }
+            }
+
+            // Kiểm tra xem hộp thoại Profile Switcher div[role='dialog'] đã đang mở và có sẵn danh sách hay chưa
+            var existingDialog = page.Locator("div[role='dialog']:visible");
+            if (await existingDialog.CountAsync().ConfigureAwait(false) > 0)
+            {
+                var seeAllInside = page.Locator("div[role='dialog'] div[role='button']:has-text('Xem tất cả trang cá nhân'):visible, div[role='dialog'] div[role='button']:has-text('See all profiles'):visible, div[role='dialog'] div[role='button']:has-text('Xem tất cả các trang cá nhân'):visible");
+                if (await seeAllInside.CountAsync().ConfigureAwait(false) > 0)
+                {
+                    try { await seeAllInside.Nth(0).ClickAsync(new() { Timeout = 3000 }).ConfigureAwait(false); } catch { }
+                    await Task.Delay(1000).ConfigureAwait(false);
+                }
+
+                var existingItems = await GetDialogProfileElementsAsync(page).ConfigureAwait(false);
+                if (existingItems.Count > 1)
+                {
+                    return true;
+                }
+            }
+
+            // Định vị chính xác nút Avatar người dùng trên banner:
+            // Tuyệt đối KHÔNG click nhầm quả chuông (Thông báo) hoặc Messenger
+            bool avatarClicked = false;
+            var bannerButtons = page.Locator("div[role='banner'] div[role='button']:visible, div[role='banner'] [role='button']:visible");
+            int btnCount = await bannerButtons.CountAsync().ConfigureAwait(false);
+
+            for (int b = 0; b < btnCount; b++)
+            {
+                var btn = bannerButtons.Nth(b);
+                string aria = (await btn.GetAttributeAsync("aria-label").ConfigureAwait(false) ?? "").Trim();
+                if (string.IsNullOrEmpty(aria)) continue;
+
+                string ariaLower = aria.ToLowerInvariant();
+                // Bỏ qua tuyệt đối quả chuông (Thông báo), Messenger, Tin nhắn, Menu 9 chấm, Tìm kiếm
+                if (ariaLower.Contains("thông báo") || ariaLower.Contains("notification") ||
+                    ariaLower.Contains("tin nhắn") || ariaLower.Contains("messenger") ||
+                    ariaLower.Contains("menu") || ariaLower.Contains("tìm kiếm") || ariaLower.Contains("search"))
+                {
+                    continue;
+                }
+
+                if (ariaLower.Contains("trang cá nhân") || ariaLower.Contains("your profile") ||
+                    ariaLower.Contains("tài khoản") || ariaLower.Contains("account"))
+                {
+                    try
+                    {
+                        await btn.ClickAsync(new() { Timeout = 5000 }).ConfigureAwait(false);
+                        avatarClicked = true;
+                        break;
+                    }
+                    catch { }
+                }
+            }
+
+            // Fallback: Nếu không match được qua aria-label tiếng Việt/Anh, lấy nút góc phải ngoài cùng của banner (luôn là Avatar)
+            if (!avatarClicked)
+            {
+                avatarClicked = await page.EvaluateAsync<bool>(@"() => {
+                    const banner = document.querySelector('div[role=""banner""]');
+                    if (!banner) return false;
+                    const buttons = Array.from(banner.querySelectorAll('div[role=""button""], [role=""button""]')).filter(b => {
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        if (aria.includes('thông báo') || aria.includes('notification') || aria.includes('messenger') || aria.includes('tin nhắn') || aria.includes('menu') || aria.includes('tìm kiếm')) return false;
+                        const rect = b.getBoundingClientRect();
+                        return rect.width > 20 && rect.height > 20 && rect.top < 100 && rect.right > 0;
+                    });
+                    if (buttons.length > 0) {
+                        buttons.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+                        buttons[0].click();
+                        return true;
+                    }
+                    return false;
+                }").ConfigureAwait(false);
+            }
+
+            if (!avatarClicked)
+            {
+                return false;
+            }
+
+            await Task.Delay(1200).ConfigureAwait(false);
+
+            // Click vào nút "Xem tất cả trang cá nhân" / "See all profiles" nếu có
+            var seeAllProfilesBtn = page.Locator("div[role='button']:has-text('Xem tất cả trang cá nhân'):visible, div[role='button']:has-text('See all profiles'):visible, div[role='button']:has-text('Xem tất cả các trang cá nhân'):visible, span:has-text('Xem tất cả trang cá nhân'):visible, span:has-text('See all profiles'):visible");
+            if (await seeAllProfilesBtn.CountAsync().ConfigureAwait(false) > 0)
+            {
+                try
+                {
+                    await seeAllProfilesBtn.Nth(0).ClickAsync(new() { Timeout = 4000 }).ConfigureAwait(false);
+                    await Task.Delay(1000).ConfigureAwait(false);
+                }
+                catch { }
+            }
+
+            // Chờ div[role='dialog'] xuất hiện (tối đa 5s)
+            var dialog = await page.WaitForSelectorAsync("div[role='dialog']:visible", new() { Timeout = 5000 }).ConfigureAwait(false);
+            if (dialog != null)
+            {
+                // Kiểm tra dialog vừa mở có phải bảng Thông báo hay không; nếu là Thông báo thì đóng ngay
+                bool isNotification = await page.EvaluateAsync<bool>(@"() => {
+                    const dialogs = document.querySelectorAll('div[role=""dialog""]');
+                    for (const d of dialogs) {
+                        const txt = (d.innerText || '').toLowerCase();
+                        const aria = (d.getAttribute('aria-label') || '').toLowerCase();
+                        if (aria.includes('thông báo') || aria.includes('notification')) return true;
+                        if (txt.includes('thông báo trước đó') || txt.includes('đánh dấu tất cả là đã đọc')) return true;
+                    }
+                    return false;
+                }").ConfigureAwait(false);
+
+                if (isNotification)
+                {
+                    await page.Keyboard.PressAsync("Escape").ConfigureAwait(false);
+                    await Task.Delay(500).ConfigureAwait(false);
+                    return false;
+                }
+
+                // Nếu có nút "Xem tất cả trang cá nhân" nằm ngay bên trong dialog vừa mở, click tiếp
+                var seeAllInside = page.Locator("div[role='dialog'] div[role='button']:has-text('Xem tất cả trang cá nhân'):visible, div[role='dialog'] div[role='button']:has-text('See all profiles'):visible, div[role='dialog'] div[role='button']:has-text('Xem tất cả các trang cá nhân'):visible");
+                if (await seeAllInside.CountAsync().ConfigureAwait(false) > 0)
+                {
+                    try
+                    {
+                        await seeAllInside.Nth(0).ClickAsync(new() { Timeout = 3000 }).ConfigureAwait(false);
+                        await Task.Delay(1000).ConfigureAwait(false);
+                    }
+                    catch { }
+                }
+
+                // Đưa vị trí cuộn về đỉnh (top = 0)
+                await page.EvaluateAsync(@"() => {
+                    let dialogs = document.querySelectorAll('div[role=""dialog""]');
+                    if (dialogs.length > 0) {
+                        let scrollers = dialogs[0].querySelectorAll('div[style*=""overflow-y: auto""], div[style*=""overflow-y: scroll""], div[style*=""overflow: auto""]');
+                        for (let sc of scrollers) sc.scrollTop = 0;
+                    }
+                }").ConfigureAwait(false);
+                return true;
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("OpenProfileSwitcherDialog", $"Lỗi mở Profile Switcher Dialog: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<IReadOnlyList<ILocator>> GetDialogProfileElementsAsync(IPage page)
+    {
+        try
+        {
+            // Selector chuẩn theo Prompt: chỉ bắt các thẻ listitem chứa radio hoặc button chuyển profile
+            var rawElements = await page.Locator("div[role='dialog'] div[role='listitem']:has(div[role='radio']), div[role='dialog'] div[role='listitem']:has(div[role='button'])").AllAsync().ConfigureAwait(false);
+            if (rawElements.Count == 0)
+            {
+                // Dự phòng: bắt div[role='listitem'] hiển thị
+                rawElements = await page.Locator("div[role='dialog'] div[role='listitem']:visible").AllAsync().ConfigureAwait(false);
+            }
+
+            var validList = new List<ILocator>();
+            for (int idx = 0; idx < rawElements.Count; idx++)
+            {
+                var el = rawElements[idx];
+                try
+                {
+                    string text = (await el.InnerTextAsync().ConfigureAwait(false) ?? "").Trim();
+                    if (IsValidPageItem(text))
+                    {
+                        validList.Add(el);
+                    }
+                }
+                catch { }
+            }
+
+            return validList;
+        }
+        catch
+        {
+            return Array.Empty<ILocator>();
+        }
+    }
+
     public List<DataGridViewRow> GetAvailableVias()
     {
         var available = new List<DataGridViewRow>();
@@ -649,407 +1464,6 @@ public partial class Form1 : Form
     }
 
     // ==========================================
-    // 3. KHỞI TẠO ĐIỀU PHỐI ĐA LUỒNG ĐỘNG (StartCampaignAsync)
-    // ==========================================
-    private async Task StartCampaignAsync(List<DataGridViewRow> targetVias)
-    {
-        if (targetVias == null || targetVias.Count == 0)
-        {
-            MessageBox.Show("Không có tài khoản Via nào khả dụng để chạy chiến dịch (tất cả đang running, die, check hoặc lock chưa đủ 2 tiếng)!",
-                "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        // [YÊU CẦU 3]: Tính toán lại totalPageCount trước khi bắt đầu vòng lặp chạy Task
-        int totalPageCount = UpdateDynamicThreadCount();
-
-        // Khởi tạo lại Semaphore với số lượng động thay vì fix cứng con số 70
-        try { _concurrencySemaphore.Dispose(); } catch { }
-        _concurrencySemaphore = new SemaphoreSlim(totalPageCount > 0 ? totalPageCount : 1);
-
-        int dynamicThreadCount = totalPageCount > 0 ? totalPageCount : 1;
-
-        btnCampaign.Enabled = false;
-        btnCampaign.Text = $"⏳ Đang chạy {dynamicThreadCount}L...";
-        UpdateStatusLabel($"Bắt đầu chiến dịch: {targetVias.Count} Via (Điều phối động tối đa {dynamicThreadCount} luồng song song theo {totalPageCount} Page)...");
-
-        var tasks = new List<Task>();
-
-        foreach (var row in targetVias)
-        {
-            string id = row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
-            string pass = row.Cells["PASS"].Value?.ToString()?.Trim() ?? "";
-            string ma2fa = row.Cells["Ma2FA"].Value?.ToString()?.Trim() ?? "";
-            string bm = row.Cells["BM"].Value?.ToString()?.Trim() ?? "Bmv1";
-            string cookie = row.Cells["Cookie"].Value?.ToString()?.Trim() ?? "";
-
-            var task = Task.Run(async () =>
-            {
-                // Bắt buộc chờ Semaphore cấp phép theo số lượng luồng động
-                await _concurrencySemaphore.WaitAsync();
-                try
-                {
-                    // Chạy hàng loạt (Chạy X Luồng) -> isHeadless: true để chạy ngầm tiết kiệm RAM
-                    await RunViaProfileAsync(row, id, cookie, pass, ma2fa, bm, showDialog: false, isHeadless: true);
-                }
-                finally
-                {
-                    // Luôn giải phóng Semaphore trong khối finally của Task
-                    _concurrencySemaphore.Release();
-                }
-            });
-
-            tasks.Add(task);
-        }
-
-        try
-        {
-            await Task.WhenAll(tasks);
-            UpdateStatusLabel($"Chiến dịch hoàn tất! Đã xử lý {targetVias.Count} tài khoản.");
-            MessageBox.Show($"Đã hoàn thành chạy chiến dịch cho {targetVias.Count} tài khoản!",
-                "Chiến dịch hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            UpdateStatusLabel($"Lỗi chiến dịch: {ex.Message}");
-            MessageBox.Show($"Có lỗi trong quá trình thực hiện chiến dịch: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            btnCampaign.Enabled = true;
-            UpdateDynamicThreadCount();
-            UpdateCountLabels();
-        }
-    }
-
-    private async void btnCampaign_Click(object? sender, EventArgs e)
-    {
-        var availableVias = GetAvailableVias();
-        if (availableVias.Count == 0)
-        {
-            MessageBox.Show("Không tìm thấy tài khoản nào khả dụng để chạy!\n\n(Tất cả tài khoản đang ở trạng thái 'running', 'check', 'die' hoặc đang 'lock' nghỉ chưa đủ 2 tiếng).",
-                "Không có Via khả dụng", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        int totalPageCount = UpdateDynamicThreadCount();
-        int dynamicThreadCount = totalPageCount > 0 ? totalPageCount : 1;
-
-        var confirm = MessageBox.Show(
-            $"Tìm thấy {availableVias.Count} tài khoản khả dụng (bao gồm các Via 'lock' đã nghỉ trên 2 tiếng được tự động mở khóa sang 'live').\n\nTổng số Page ghi nhận: {totalPageCount} Page.\nSố luồng song song tự động khởi tạo: {dynamicThreadCount} Luồng.\n\nBạn có muốn bắt đầu chạy chiến dịch không?",
-            "Xác nhận chạy chiến dịch", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-
-        if (confirm != DialogResult.Yes)
-            return;
-
-        await StartCampaignAsync(availableVias);
-    }
-
-    // ==========================================
-    // 2 & 3. TÍNH NĂNG "QUÉT TỔNG PAGE" CHO VIA RUN
-    // ==========================================
-    private async void btnScanTotalPages_Click(object? sender, EventArgs e)
-    {
-        // [YÊU CẦU 1]: RESET BỘ NHỚ ẢO TRƯỚC KHI QUÉT BATCH
-        // Làm mới bộ nhớ để chia lại Page từ đầu mỗi khi bấm nút quét
-        GlobalState.ProcessedPageIds.Clear();
-
-        // BỘ LỌC NGHIÊM NGẶT:
-        // 1. Cột 'Vai Trò' có giá trị là "Run" (Bỏ qua hoàn toàn giá trị "Reg").
-        // 2. Cột 'Trạng Thái' khác "die" và khác "check".
-        var targetRows = new List<DataGridViewRow>();
-
-        foreach (DataGridViewRow row in dgvAccounts.Rows)
-        {
-            if (row.IsNewRow) continue;
-
-            string id = row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
-            if (string.IsNullOrEmpty(id)) continue;
-
-            string vaiTro = row.Cells["VaiTro"].Value?.ToString()?.Trim() ?? "";
-            string trangThai = row.Cells["TrangThai"].Value?.ToString()?.Trim() ?? "";
-
-            // Điều kiện 1: Vai Trò phải là "Run" (bỏ qua hoàn toàn "Reg")
-            if (!vaiTro.Equals("Run", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            // Điều kiện 2: Trạng Thái khác "die" và khác "check"
-            if (trangThai.Equals("die", StringComparison.OrdinalIgnoreCase) ||
-                trangThai.Equals("check", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            targetRows.Add(row);
-        }
-
-        if (targetRows.Count == 0)
-        {
-            MessageBox.Show("Không tìm thấy tài khoản nào thỏa mãn bộ lọc để quét Page!\n\nĐiều kiện lọc:\n- Vai Trò = 'Run' (bỏ qua 'Reg')\n- Trạng Thái KHÁC 'die' và KHÁC 'check'.",
-                "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        var confirm = MessageBox.Show(
-            $"Tìm thấy {targetRows.Count} tài khoản thỏa mãn bộ lọc (Vai Trò = 'Run' và Trạng Thái != 'die' / 'check').\n\nBạn có muốn bắt đầu quét tổng số Page lần lượt cho các Via này không?",
-            "Xác nhận quét tổng Page", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-
-        if (confirm != DialogResult.Yes)
-            return;
-
-        btnScanTotalPages.Enabled = false;
-        int currentIndex = 0;
-        int totalPagesAll = 0;
-
-        try
-        {
-            foreach (var row in targetRows)
-            {
-                currentIndex++;
-                string id = row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
-                string pass = row.Cells["PASS"].Value?.ToString()?.Trim() ?? "";
-                string ma2fa = row.Cells["Ma2FA"].Value?.ToString()?.Trim() ?? "";
-                string cookie = row.Cells["Cookie"].Value?.ToString()?.Trim() ?? "";
-
-                btnScanTotalPages.Text = $"⏳ Quét ({currentIndex}/{targetRows.Count})...";
-                UpdateStatusLabel($"Đang quét tổng số Page cho UID {id} ({currentIndex}/{targetRows.Count})...");
-
-                // Chạy quét hàng loạt -> isHeadless: true để chạy ngầm tiết kiệm RAM
-                int pageCount = await ScanViaPageCountAsync(row, id, cookie, pass, ma2fa, isHeadless: true);
-                totalPagesAll += pageCount;
-
-                // Cập nhật real-time số luồng trên nút Chạy sau khi mỗi Via quét xong
-                UpdateDynamicThreadCount();
-            }
-
-            UpdateStatusLabel($"Hoàn tất quét tổng Page! Đã xử lý {targetRows.Count} tài khoản, tổng số Page: {totalPagesAll}.");
-            MessageBox.Show($"Đã quét thành công {targetRows.Count} tài khoản!\n\nTổng số Page ghi nhận: {totalPagesAll} Page.",
-                "Hoàn tất quét tổng Page", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            UpdateStatusLabel($"Lỗi khi quét tổng Page: {ex.Message}");
-            MessageBox.Show($"Có lỗi trong quá trình quét: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            btnScanTotalPages.Enabled = true;
-            btnScanTotalPages.Text = "📊 Quét Tổng Page";
-            UpdateDynamicThreadCount();
-        }
-    }
-
-    private async Task<int> ScanViaPageCountAsync(DataGridViewRow row, string id, string rawCookie, string pass, string ma2fa, bool isHeadless = true)
-    {
-        IBrowserContext? context = null;
-        IPlaywright? playwright = null;
-        string currentViaId = id?.Trim() ?? "";
-
-        try
-        {
-            // [RÀNG BUỘC 1]: RESET BIẾN ĐẾM TRONG TỪNG LUỒNG
-            // Ngay khi bắt đầu xử lý một Via mới (đầu khối try của hàm quét), bắt buộc khởi tạo int validPageCount = 0;
-            // Không dùng biến toàn cục cho việc đếm này để tránh dính số liệu của Via trước.
-            int validPageCount = 0;
-
-            // Khởi tạo thư mục Profile cố định cho UID
-            string profilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BrowserProfiles", currentViaId);
-            Directory.CreateDirectory(profilePath);
-
-            playwright = await Playwright.CreateAsync();
-
-            string channel = File.Exists(@"C:\Program Files\Google\Chrome\Application\chrome.exe") ||
-                             File.Exists(@"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")
-                             ? "chrome" : "msedge";
-
-            context = await playwright.Chromium.LaunchPersistentContextAsync(
-                profilePath,
-                new BrowserTypeLaunchPersistentContextOptions
-                {
-                    Headless = isHeadless,
-                    Channel = channel,
-                    UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    Args = new[]
-                    {
-                        "--disable-blink-features=AutomationControlled",
-                        "--start-maximized",
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--ignore-certificate-errors",
-                        "--enable-features=NetworkService,NetworkServiceInProcess",
-                        "--dns-prefetch-disable"
-                    },
-                    ViewportSize = ViewportSize.NoViewport
-                }
-            );
-
-            var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
-
-            // 1. Tiêm Cookie vào trình duyệt nếu có
-            if (!string.IsNullOrWhiteSpace(rawCookie))
-            {
-                var cookieList = CookieHelper.ParseCookieString(rawCookie);
-                if (cookieList.Count > 0)
-                {
-                    await context.AddCookiesAsync(cookieList);
-                }
-            }
-
-            // 2. Điều hướng tới Facebook
-            await page.GotoAsync("https://www.facebook.com", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 45000 });
-            await Task.Delay(3000);
-
-            string currentUrl = page.Url;
-            if (currentUrl.Contains("checkpoint", StringComparison.OrdinalIgnoreCase))
-            {
-                SetRowStatus(row, currentViaId, "check");
-                AccountRepository.UpdateAccountStatus(_connectionString, currentViaId, "check");
-                AccountRepository.ReleaseAssignedPages(_connectionString, currentViaId);
-                SetRowPageCount(row, validPageCount);
-                AccountRepository.UpdateAccountPageCount(_connectionString, currentViaId, validPageCount);
-                return validPageCount;
-            }
-
-            var cookies = await context.CookiesAsync();
-            bool hasCUser = cookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
-            string cookieCUser = cookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase))?.Value?.Trim() ?? "";
-
-            // Nếu cookie die thì fallback đăng nhập bằng ID / PASS / 2FA
-            if (!hasCUser && !string.IsNullOrWhiteSpace(pass))
-            {
-                var emailInput = page.Locator("input[name='email'], #email");
-                if (await emailInput.CountAsync() > 0)
-                {
-                    await emailInput.First.FillAsync(currentViaId);
-                    await page.FillAsync("input[name='pass'], #pass", pass);
-
-                    var loginBtn = page.Locator("button[name='login'], button[type='submit'], button:has-text('Đăng nhập'), button:has-text('Log In')");
-                    if (await loginBtn.CountAsync() > 0)
-                        await loginBtn.First.ClickAsync();
-                    else
-                        await page.Keyboard.PressAsync("Enter");
-
-                    try
-                    {
-                        await page.WaitForURLAsync(u => u.Contains("checkpoint") || u.Contains("home") || u.Contains("two_factor") || u.Contains("login"), new() { Timeout = 15000 });
-                    }
-                    catch { }
-
-                    await Task.Delay(3000);
-
-                    var otpInputs = page.Locator("input[name='approvals_code'], input[type='tel'], input[placeholder*='code'], input[placeholder*='mã']");
-                    if (await otpInputs.CountAsync() > 0 && !string.IsNullOrWhiteSpace(ma2fa))
-                    {
-                        string otp = TotpGenerator.GenerateTotp(ma2fa);
-                        if (!string.IsNullOrEmpty(otp))
-                        {
-                            await otpInputs.First.FillAsync(otp);
-                            var submitBtn = page.Locator("button[type='submit'], #checkpointSubmitButton, button[id*='checkpoint']");
-                            if (await submitBtn.CountAsync() > 0)
-                                await submitBtn.First.ClickAsync();
-                            else
-                                await page.Keyboard.PressAsync("Enter");
-
-                            await Task.Delay(4000);
-                        }
-                    }
-                }
-
-                cookies = await context.CookiesAsync();
-                hasCUser = cookies.Any(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(c.Value));
-                cookieCUser = cookies.FirstOrDefault(c => c.Name.Equals("c_user", StringComparison.OrdinalIgnoreCase))?.Value?.Trim() ?? "";
-
-                if (page.Url.Contains("checkpoint", StringComparison.OrdinalIgnoreCase) || !hasCUser)
-                {
-                    SetRowStatus(row, currentViaId, "check");
-                    AccountRepository.UpdateAccountStatus(_connectionString, currentViaId, "check");
-                    AccountRepository.ReleaseAssignedPages(_connectionString, currentViaId);
-                    SetRowPageCount(row, validPageCount);
-                    AccountRepository.UpdateAccountPageCount(_connectionString, currentViaId, validPageCount);
-                    return validPageCount;
-                }
-            }
-
-            // Cập nhật lại cookie mới nếu có
-            string fullCookie = string.Join("; ", cookies.Select(c => $"{c.Name}={c.Value}"));
-            SetRowCookie(row, fullCookie);
-            AccountRepository.UpdateAccountCookie(_connectionString, currentViaId, fullCookie);
-
-            // 3. Quét danh sách Page_ID của con Via này
-            var managedPages = await ExtractManagedPageIdsAsync(page, currentViaId);
-
-            // [RÀNG BUỘC 2]: RÀNG BUỘC ĐIỀU KIỆN LỌC PAGE ID (RẤT QUAN TRỌNG)
-            foreach (var rawPid in managedPages)
-            {
-                if (string.IsNullOrWhiteSpace(rawPid))
-                    continue;
-
-                string extractedId = rawPid.Trim();
-
-                // Kiểm tra tính hợp lệ: chuỗi số dài hơn 10 ký tự
-                if (extractedId.Length <= 10 || !extractedId.All(char.IsDigit))
-                    continue;
-
-                // Màng lọc 1: Tuyệt đối không đếm ID của chính con Via đang chạy
-                if (extractedId == currentViaId || 
-                    string.Equals(extractedId, currentViaId, StringComparison.OrdinalIgnoreCase) ||
-                    (!string.IsNullOrEmpty(cookieCUser) && string.Equals(extractedId, cookieCUser, StringComparison.OrdinalIgnoreCase)))
-                {
-                    continue;
-                }
-
-                // Màng lọc 2: Chống trùng ID với Via khác
-                if (!GlobalState.TryAddPage(extractedId))
-                {
-                    continue;
-                }
-
-                // Chỉ khi qua lọt 2 màng lọc này mới thực hiện validPageCount++;
-                validPageCount++;
-            }
-
-            // [RÀNG BUỘC 3]: RÀNG BUỘC CẬP NHẬT UI (DATAGRIDVIEW)
-            // Dù validPageCount là 0 hay 100, BẮT BUỘC phải dùng chính biến validPageCount này để gán lại giá trị cho cột 'PageCount' của dòng đó trên DataGridView.
-            // Lệnh cập nhật: row.Cells["PageCount"].Value = validPageCount;
-            // Cập nhật tương ứng xuống CSDL SQLite (báo đúng số 0 nếu không có).
-            SetRowPageCount(row, validPageCount);
-            AccountRepository.UpdateAccountPageCount(_connectionString, currentViaId, validPageCount);
-
-            // [QUAN TRỌNG]: Kết thúc quá trình quét của một Via, phải GIỮ NGUYÊN trạng thái là 'live' trên UI và Database
-            // (TUYỆT ĐỐI KHÔNG chuyển thành 'lock' hay cập nhật LastRunTime ở bước này).
-            SetRowStatus(row, currentViaId, "live");
-            AccountRepository.UpdateAccountStatus(_connectionString, currentViaId, "live");
-
-            UpdateStatusLabel($"UID: {currentViaId} - Quét thành công: {validPageCount} Page thực tế không trùng (Giữ trạng thái LIVE).");
-            return validPageCount;
-        }
-        catch (Exception ex)
-        {
-            UpdateStatusLabel($"Lỗi khi quét Page UID {id}: {ex.Message}");
-            SetRowPageCount(row, 0);
-            AccountRepository.UpdateAccountPageCount(_connectionString, currentViaId, 0);
-            return 0;
-        }
-        finally
-        {
-            // Đóng trình duyệt an toàn (context.CloseAsync) và giải phóng RAM để chạy tiếp Via khác
-            try
-            {
-                if (context != null)
-                {
-                    await context.CloseAsync();
-                    await context.DisposeAsync();
-                }
-            }
-            catch { }
-
-            try
-            {
-                playwright?.Dispose();
-            }
-            catch { }
-        }
-    }
-
-    // ==========================================
     // EXTRACT PAGES & OTHER EVENT HANDLERS
     // ==========================================
     private async Task<List<string>> ExtractManagedPageIdsAsync(IPage page, string viaUid)
@@ -1060,68 +1474,131 @@ public partial class Form1 : Form
         {
             // Điều hướng tới trang danh sách Pages
             await page.GotoAsync("https://www.facebook.com/pages/?category=your_pages", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 25000 });
-            await Task.Delay(3500);
+            // Cuộn trang từ từ xuống cuối để kích hoạt Lazy Loading tải toàn bộ danh sách Page
+            long previousHeight = 0;
+            int noChangeCount = 0;
+            int scrollAttempts = 0;
+            const int maxScrollAttempts = 40;
 
-            // [YÊU CẦU 1]: SỬA BỘ LỌC TÌM PAGE ID (THU HẸP VÙNG QUÉT LOCATOR)
-            // Thu hẹp vùng quét, chỉ trích xuất từ những thẻ <a> có đường dẫn href hợp lệ trỏ về Profile Page trong vùng nội dung chính
-            var mainLocator = page.Locator("div[role='main'] a[href], main a[href]");
-            int linkCount = await mainLocator.CountAsync();
-
-            string[] hrefs;
-            if (linkCount > 0)
+            while (noChangeCount < 2 && scrollAttempts < maxScrollAttempts)
             {
-                hrefs = await mainLocator.EvaluateAllAsync<string[]>("els => els.map(e => e.getAttribute('href') || '')");
+                scrollAttempts++;
+                long currentHeight = await page.EvaluateAsync<long>(@"() => {
+                    window.scrollTo(0, document.body.scrollHeight || document.documentElement.scrollHeight);
+                    const mainEl = document.querySelector('div[role=""main""]') || document.scrollingElement || document.documentElement;
+                    if (mainEl && mainEl.scrollHeight > mainEl.clientHeight) {
+                        mainEl.scrollTop = mainEl.scrollHeight;
+                    }
+                    return Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0, mainEl ? mainEl.scrollHeight : 0);
+                }");
+
+                if (currentHeight == previousHeight)
+                {
+                    noChangeCount++;
+                }
+                else
+                {
+                    noChangeCount = 0;
+                    previousHeight = currentHeight;
+                }
+
+                await Task.Delay(1000);
             }
-            else
-            {
-                // Dự phòng nếu giao diện Facebook không có role='main': chỉ trích xuất thẻ <a> chứa profile.php?id= hoặc /pages/
-                hrefs = await page.Locator("a[href*='profile.php?id='], a[href*='/pages/category/'], a[href*='/pages/']").EvaluateAllAsync<string[]>(
-                    "els => els.map(e => e.getAttribute('href') || '')"
-                );
-            }
 
-            // Bắt buộc dùng Regex để lọc chuỗi ID: ID phải là chuỗi số dài hơn 10 ký tự
-            // NPE Page luôn có dạng 615... (14-16 số) hoặc ID số dài > 10 trong URL profile.php / pages
-            var idRegex = new System.Text.RegularExpressions.Regex(
-                @"(?:id=|\/profile\.php\?id=|\/pages\/[^\/]+\/|\/pages\/|\/)(615\d{11,13}|\d{11,20})(?:[/?#&]|$)",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase
-            );
+            // [YÊU CẦU DỰ PHÒNG]: BÓC TÁCH CARD-BY-CARD TRÊN TRANG /PAGES (CHỈ LẤY ID 615... 14-15 CHỮ SỐ)
+            var extractedIds = await page.EvaluateAsync<string[]>(@"() => {
+                const mainEl = document.querySelector('div[role=""main""]') || document.querySelector('main') || document.body;
+                const result = [];
+                const seen = new Set();
+                
+                // Loại trừ toàn bộ link bài viết, ảnh, video, story, settings, v.v.
+                const excludeKeywords = /friends|watch|marketplace|groups|gaming|bookmarks|events|saved|memories|messages|notifications|settings|privacy|policies|help|create|invites|category=your_pages|ads|business|login|recover|user|\/posts\/|\/photos\/|\/videos\/|story_fbid|set=a\.|fbid=|\/stories\/|\/permalink\//i;
 
-            // Bỏ qua các URL menu điều hướng hệ thống để chống nhận diện nhầm
-            var excludedUrlKeywords = new[]
-            {
-                "/friends", "/watch", "/marketplace", "/groups", "/gaming", "/bookmarks",
-                "/events", "/saved", "/memories", "/messages", "/notifications", "/settings",
-                "/privacy", "/policies", "/help", "/create", "/invites", "category=your_pages",
-                "/ads", "/business", "/login", "/recover", "/user/"
-            };
+                // 1. Quét TẤT CẢ các thẻ <a> bên trong khu vực nội dung chính
+                const rawLinks = Array.from(mainEl.querySelectorAll('a[href]'));
+                const linkItems = [];
+
+                for (const a of rawLinks) {
+                    const href = a.getAttribute('href') || '';
+                    if (!href || excludeKeywords.test(href)) continue;
+
+                    // TUYỆT ĐỐI CHỈ lấy ID bắt đầu bằng 615... và có độ dài 14-15 chữ số
+                    const m615 = href.match(/(?:id=|\/profile\.php\?id=|\/pages\/[^\/]+\/|\/pages\/|\/)(615\d{11,12})(?:[/?#&]|$)/);
+                    if (m615 && m615[1]) {
+                        const pageId = m615[1];
+                        const rect = a.getBoundingClientRect();
+                        linkItems.push({
+                            id: pageId,
+                            top: Math.round(rect.top + window.scrollY)
+                        });
+                    }
+                }
+
+                if (linkItems.length > 0) {
+                    // Sắp xếp các link theo chiều dọc từ trên xuống dưới
+                    linkItems.sort((x, y) => x.top - y.top);
+
+                    for (const item of linkItems) {
+                        if (!seen.has(item.id)) {
+                            seen.add(item.id);
+                            result.push(item.id);
+                        }
+                    }
+                }
+
+                return result;
+            }").ConfigureAwait(false);
 
             string cleanViaUid = viaUid.Trim();
 
-            foreach (var rawHref in hrefs)
+            if (extractedIds != null && extractedIds.Length > 0)
             {
-                if (string.IsNullOrWhiteSpace(rawHref))
-                    continue;
-
-                string href = rawHref.Trim();
-
-                if (excludedUrlKeywords.Any(kw => href.Contains(kw, StringComparison.OrdinalIgnoreCase)))
-                    continue;
-
-                var match = idRegex.Match(href);
-                if (match.Success)
+                foreach (var pid in extractedIds)
                 {
-                    string pid = match.Groups[1].Value.Trim();
+                    if (string.IsNullOrWhiteSpace(pid) || !pid.All(char.IsDigit))
+                        continue;
+                    if (!pid.StartsWith("615") || (pid.Length != 14 && pid.Length != 15))
+                        continue;
+                    if (pid.Equals(cleanViaUid, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    pageIds.Add(pid);
+                }
+            }
 
-                    // Bắt buộc kiểm tra: ID phải là chuỗi số dài hơn 10 ký tự
-                    if (pid.Length > 10 && pid.All(char.IsDigit))
+            // Dự phòng: nếu evaluate theo card không ra ID nào, quét theo link trực tiếp
+            if (pageIds.Count == 0)
+            {
+                var mainLocator = page.Locator("div[role='main'] a[href], main a[href]");
+                int linkCount = await mainLocator.CountAsync();
+                string[] hrefs = linkCount > 0
+                    ? await mainLocator.EvaluateAllAsync<string[]>("els => els.map(e => e.getAttribute('href') || '')")
+                    : await page.Locator("a[href]").EvaluateAllAsync<string[]>("els => els.map(e => e.getAttribute('href') || '')");
+
+                var idRegex615 = new System.Text.RegularExpressions.Regex(
+                    @"(?:id=|\/profile\.php\?id=|\/pages\/[^\/]+\/|\/pages\/|\/)(615\d{11,12})(?:[/?#&]|$)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                );
+
+                var excludedUrlKeywords = new[]
+                {
+                    "/friends", "/watch", "/marketplace", "/groups", "/gaming", "/bookmarks",
+                    "/events", "/saved", "/memories", "/messages", "/notifications", "/settings",
+                    "/privacy", "/policies", "/help", "/create", "/invites", "category=your_pages",
+                    "/ads", "/business", "/login", "/recover", "/user/",
+                    "/posts/", "/photos/", "/videos/", "story_fbid", "set=a.", "fbid=", "/stories/", "/permalink/"
+                };
+
+                foreach (var rawHref in hrefs)
+                {
+                    if (string.IsNullOrWhiteSpace(rawHref)) continue;
+                    string href = rawHref.Trim();
+                    if (excludedUrlKeywords.Any(kw => href.Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
+
+                    var m615 = idRegex615.Match(href);
+                    if (m615.Success)
                     {
-                        // Bỏ qua nếu là UID cá nhân 1000... không thuộc đường dẫn /pages/
-                        if (pid.StartsWith("1000") && !href.Contains("/pages/") && !href.Contains("profile.php?id="))
-                            continue;
-
-                        // Đặc biệt, nếu ID bắt được trùng với ID của Via gốc, BẮT BUỘC bỏ qua để chống đếm ảo
-                        if (!pid.Equals(cleanViaUid, StringComparison.OrdinalIgnoreCase))
+                        string pid = m615.Groups[1].Value.Trim();
+                        if (pid.StartsWith("615") && (pid.Length == 14 || pid.Length == 15) && pid.All(char.IsDigit) && !pid.Equals(cleanViaUid, StringComparison.OrdinalIgnoreCase))
                         {
                             pageIds.Add(pid);
                         }
@@ -1134,7 +1611,27 @@ public partial class Form1 : Form
             System.Diagnostics.Debug.WriteLine($"Lỗi quét Pages: {ex.Message}");
         }
 
-        return pageIds.ToList();
+        return DeduplicatePageIdPairs(pageIds.ToList());
+    }
+
+    /// <summary>
+    /// Lọc danh sách Page ID theo yêu cầu cơ chế dự phòng trang /pages:
+    /// TUYỆT ĐỐI CHỈ lấy các ID thỏa mãn 2 điều kiện:
+    /// 1. Bắt đầu bằng 615...
+    /// 2. Có độ dài 14-15 chữ số.
+    /// (Toàn bộ ID đầu 179... hoặc 12... bị loại bỏ hoàn toàn).
+    /// </summary>
+    private static List<string> DeduplicatePageIdPairs(List<string> rawIds)
+    {
+        if (rawIds == null || rawIds.Count == 0)
+            return new List<string>();
+
+        return rawIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Where(id => id.StartsWith("615") && (id.Length == 14 || id.Length == 15) && id.All(char.IsDigit))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private void dgvAccounts_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
@@ -1209,6 +1706,13 @@ public partial class Form1 : Form
 
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
+
+        using (var pragmaCmd = conn.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 15000;";
+            pragmaCmd.ExecuteNonQuery();
+        }
+
         using var transaction = conn.BeginTransaction();
 
         try
@@ -1293,7 +1797,11 @@ public partial class Form1 : Form
                 if (trangThai.Equals("die", StringComparison.OrdinalIgnoreCase) ||
                     trangThai.Equals("check", StringComparison.OrdinalIgnoreCase))
                 {
-                    AccountRepository.ReleaseAssignedPages(_connectionString, id);
+                    using var relCmd = conn.CreateCommand();
+                    relCmd.Transaction = transaction;
+                    relCmd.CommandText = "DELETE FROM AssignedPages WHERE Via_UID = $id;";
+                    relCmd.Parameters.AddWithValue("$id", id);
+                    relCmd.ExecuteNonQuery();
                 }
 
                 row.Tag = id;
@@ -1366,144 +1874,34 @@ public partial class Form1 : Form
         if (confirm != DialogResult.Yes)
             return;
 
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-
-        using (var pragmaCmd = conn.CreateCommand())
+        var idsToDelete = new List<string>();
+        foreach (var row in rowsToDelete)
         {
-            pragmaCmd.CommandText = "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 15000;";
-            pragmaCmd.ExecuteNonQuery();
+            string id = (row.Tag as string) ?? row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
+            if (!string.IsNullOrEmpty(id))
+            {
+                idsToDelete.Add(id);
+            }
         }
 
-        using var transaction = conn.BeginTransaction();
-
+        int deletedCount = 0;
         try
         {
-            using var cmdAssigned = conn.CreateCommand();
-            cmdAssigned.Transaction = transaction;
-            cmdAssigned.CommandText = "DELETE FROM AssignedPages WHERE Via_UID = $id;";
-            var pAssignedId = cmdAssigned.Parameters.Add("$id", SqliteType.Text);
-
-            using var cmdAccount = conn.CreateCommand();
-            cmdAccount.Transaction = transaction;
-            cmdAccount.CommandText = "DELETE FROM Accounts WHERE ID = $id;";
-            var pAccountId = cmdAccount.Parameters.Add("$id", SqliteType.Text);
-
-            int deletedCount = 0;
-            foreach (var row in rowsToDelete)
-            {
-                string id = (row.Tag as string) ?? row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
-                if (!string.IsNullOrEmpty(id))
-                {
-                    pAssignedId.Value = id;
-                    cmdAssigned.ExecuteNonQuery();
-
-                    pAccountId.Value = id;
-                    cmdAccount.ExecuteNonQuery();
-
-                    deletedCount++;
-                }
-            }
-
-            transaction.Commit();
-
-            statusLabel.Text = $"Đã xóa {deletedCount} tài khoản 'die'.";
-            UpdateCountLabels();
-            LoadAccountsFromDb(txtSearch.Text);
-            UpdateDynamicThreadCount();
-
-            MessageBox.Show($"Đã xóa thành công {deletedCount} tài khoản 'die' khỏi SQLite!",
-                "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            deletedCount = _accountRepository.DeleteAccounts(idsToDelete);
         }
         catch (Exception ex)
         {
-            transaction.Rollback();
             MessageBox.Show($"Lỗi khi xóa dòng: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private async void btnGetCookie_Click(object? sender, EventArgs e)
-    {
-        dgvAccounts.EndEdit();
-
-        var targetRows = new List<DataGridViewRow>();
-        foreach (DataGridViewRow row in dgvAccounts.SelectedRows)
-        {
-            if (!row.IsNewRow && !string.IsNullOrWhiteSpace(row.Cells["ID"].Value?.ToString()))
-                targetRows.Add(row);
-        }
-
-        if (targetRows.Count == 0)
-        {
-            foreach (DataGridViewRow row in dgvAccounts.Rows)
-            {
-                if (!row.IsNewRow && !string.IsNullOrWhiteSpace(row.Cells["ID"].Value?.ToString()))
-                    targetRows.Add(row);
-            }
-        }
-
-        if (targetRows.Count == 0)
-        {
-            MessageBox.Show("Không có tài khoản nào trong bảng để chạy lấy Cookie!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        btnGetCookie.Enabled = false;
-        int successCount = 0;
+        statusLabel.Text = $"Đã xóa {deletedCount} tài khoản 'die'.";
+        UpdateCountLabels();
+        LoadAccountsFromDb(txtSearch.Text);
+        UpdateDynamicThreadCount();
 
-        try
-        {
-            using var conn = new SqliteConnection(_connectionString);
-            conn.Open();
-
-            foreach (var row in targetRows)
-            {
-                string id = row.Cells["ID"].Value?.ToString()?.Trim() ?? "";
-
-                statusLabel.Text = $"Đang cập nhật Cookie cho UID: {id}...";
-                await Task.Delay(200);
-
-                string existingCookie = row.Cells["Cookie"].Value?.ToString()?.Trim() ?? "";
-                if (string.IsNullOrEmpty(existingCookie))
-                {
-                    LogConsole(id, "Tài khoản chưa có Cookie trong DB. Không tạo cookie giả (Zero Synthetic Invariant).");
-                    continue;
-                }
-
-                string validCookie = existingCookie;
-                row.Cells["Cookie"].Value = validCookie;
-                if (string.IsNullOrEmpty(row.Cells["TrangThai"].Value?.ToString()))
-                {
-                    row.Cells["TrangThai"].Value = "live";
-                }
-
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = @"
-                    UPDATE Accounts
-                    SET Cookie = $cookie,
-                        TrangThai = CASE WHEN TrangThai IS NULL OR TrangThai = '' THEN 'live' ELSE TrangThai END
-                    WHERE ID = $id;
-                ";
-                cmd.Parameters.AddWithValue("$cookie", validCookie);
-                cmd.Parameters.AddWithValue("$id", id);
-                cmd.ExecuteNonQuery();
-
-                dgvAccounts.InvalidateRow(row.Index);
-                successCount++;
-            }
-
-            statusLabel.Text = $"Hoàn tất lấy Cookie cho {successCount} tài khoản!";
-            MessageBox.Show($"Đã cập nhật Cookie và lưu vào SQLite cho {successCount} tài khoản!",
-                "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Lỗi khi chạy lấy Cookie: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            btnGetCookie.Enabled = true;
-        }
+        MessageBox.Show($"Đã xóa thành công {deletedCount} tài khoản 'die' khỏi SQLite!",
+            "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void btnReload_Click(object? sender, EventArgs e)

@@ -15,7 +15,22 @@ public partial class FormCookieResult : Form
         InitializeComponent();
         _viaUid = viaUid;
         _bm = bm;
-        _cookieLines = cookieLines ?? new List<string>();
+
+        // Bỏ hoàn toàn tiền tố ID Page hoặc bất kỳ nội dung nào trước dấu '|', chỉ giữ lại chuỗi cookie chuẩn
+        var cleanedLines = (cookieLines ?? new List<string>()).Select(line =>
+        {
+            if (string.IsNullOrWhiteSpace(line)) return "";
+            int pipeIdx = line.IndexOf('|');
+            if (pipeIdx >= 0)
+            {
+                string afterPipe = line.Substring(pipeIdx + 1).Trim();
+                if (afterPipe.Contains('='))
+                    return afterPipe;
+            }
+            return line.Trim();
+        }).Where(l => !string.IsNullOrEmpty(l)).ToList();
+
+        _cookieLines = cleanedLines;
 
         Text = $"Kết Quả Cookie Page - [{_viaUid}]";
         lblTitle.Text = $"🔑 Kết Quả Cookie Page - UID: {_viaUid}";

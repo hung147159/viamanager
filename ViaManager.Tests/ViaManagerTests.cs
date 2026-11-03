@@ -333,5 +333,79 @@ namespace ViaManager.Tests
             Assert.EndsWith("#", masked);
             Assert.Contains("***", masked);
         }
+
+        // =========================================================================
+        // TEST 9: AccountRepository.DeleteAccounts deletes accounts and assigned pages
+        // =========================================================================
+        [Fact]
+        public void AccountRepository_DeleteAccounts_DeletesAtomicallyWithoutLock()
+        {
+            // Arrange
+            var accountRepo = new ViaManager.Data.AccountRepository(_testConnectionString);
+            var pageRepo = new ViaManager.Data.PageRepository(_testConnectionString);
+
+            var acc = new ViaAccount
+            {
+                Uid = "DIE_TEST_001",
+                Password = "pwd",
+                Status = "die"
+            };
+            accountRepo.BatchUpsert(new[] { acc });
+
+            var page = new ManagedPage
+            {
+                PageId = "PAGE_TEST_001",
+                VerificationStatus = VerificationStatus.Verified
+            };
+            pageRepo.AssignPagesAtomic("Bmv1", "DIE_TEST_001", new[] { page });
+
+            // Act: Delete
+            int deleted = accountRepo.DeleteAccounts(new[] { "DIE_TEST_001" });
+
+            // Assert
+            Assert.Equal(1, deleted);
+            var allAccounts = accountRepo.GetAllAccounts();
+            Assert.DoesNotContain(allAccounts, a => a.Uid == "DIE_TEST_001");
+
+            var assignedPages = pageRepo.GetPagesByViaUid("DIE_TEST_001");
+            Assert.Empty(assignedPages);
+        }
+
+        // =========================================================================
+        // TEST 10: Canonical HTTP Cookie Header layout matching Facebook web traffic
+        // =========================================================================
+        [Fact]
+        public void CookieSerializer_FormatsCanonicalHttpCookieHeader_MatchingWebTraffic()
+        {
+            // Arrange: Simulate Facebook cookies returned from browser context
+            var rawCookies = new List<BrowserContextCookiesResult>
+            {
+                new() { Name = "wd", Value = "932x730", Domain = ".facebook.com" },
+                new() { Name = "c_user", Value = "100052862241886", Domain = ".facebook.com" },
+                new() { Name = "xs", Value = "12%3Agcl9r68lp-eRwQ%3A2%3A1792327189%3A-1%3A-1%3A%3AAc2hxpAX2B7R5d6gGVNqaGYDtHLTYiCWhJpkDUS5fQpy", Domain = ".facebook.com" },
+                new() { Name = "fr", Value = "1rz9N4WPd1hsP177s.AWd6IqymAKvezN3e8hJldv-Jr97nKdGFt_zDUiz9W-4l0qyRu6w.Bq6LXd..AAA.0.0.Bq6LXd.AWf7Zs68y9F62FeIb8EAw-O21Ks", Domain = ".facebook.com" },
+                new() { Name = "datr", Value = "axkhag31OIj6ND0E7hBnXcFL", Domain = ".facebook.com" },
+                new() { Name = "sb", Value = "QBlgaOAMLIbRDmWiPzRr46t4", Domain = ".facebook.com" },
+                new() { Name = "presence", Value = "C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1793634835469%2C%22v%22%3A1%7D", Domain = ".facebook.com" },
+                new() { Name = "dpr", Value = "1.25", Domain = ".facebook.com" },
+                new() { Name = "ps_l", Value = "1", Domain = ".facebook.com" },
+                new() { Name = "ps_n", Value = "1", Domain = ".facebook.com" },
+                new() { Name = "wl_cbv", Value = "v2%3Bclient_version%3A3321%3Btimestamp%3A1791897975", Domain = ".facebook.com" },
+                new() { Name = "foreign_cookie", Value = "ignore_me", Domain = ".google.com" }
+            };
+
+            // Act
+            string headerCookie = CookieSerializer.SerializeVerbatim(rawCookies);
+
+            // Assert
+            // Foreign non-facebook cookies must be excluded
+            Assert.DoesNotContain("foreign_cookie", headerCookie);
+
+            // Key session cookies must be present in canonical header order
+            Assert.StartsWith("sb=QBlgaOAMLIbRDmWiPzRr46t4; datr=axkhag31OIj6ND0E7hBnXcFL", headerCookie);
+            Assert.Contains("c_user=100052862241886", headerCookie);
+            Assert.Contains("xs=12%3Agcl9r68lp-eRwQ%3A2%3A1792327189%3A-1%3A-1%3A%3AAc2hxpAX2B7R5d6gGVNqaGYDtHLTYiCWhJpkDUS5fQpy", headerCookie);
+            Assert.EndsWith("wd=932x730", headerCookie);
+        }
     }
 }

@@ -17,10 +17,11 @@ namespace ViaManager.Services
         {
             AppLogger.Info("PageSwitch", $"Initiating switch profile to Page ID: {pageId}");
 
-            // Strategy 1: Navigate directly to the page URL
+            // Strategy 1: Navigate directly to the canonical profile page URL
             try
             {
-                await page.GotoAsync($"https://www.facebook.com/{pageId}", new()
+                string targetUrl = $"https://www.facebook.com/profile.php?id={pageId}";
+                await page.GotoAsync(targetUrl, new()
                 {
                     WaitUntil = WaitUntilState.DOMContentLoaded,
                     Timeout = 25000
@@ -31,40 +32,76 @@ namespace ViaManager.Services
 
                 var switchSelectors = new[]
                 {
-                    "div[role='button']:has-text('Switch now')",
-                    "div[role='button']:has-text('Chuyển ngay')",
-                    "div[aria-label='Switch']",
                     "div[aria-label='Chuyển']",
-                    "div[aria-label='Chuyển trang']",
+                    "div[role='button']:has-text('Chuyển ngay')",
+                    "div[role='button']:has-text('Chuyển')",
+                    "div[role='button']:has-text('Switch Now')",
+                    "div[role='button']:has-text('Switch now')",
                     "div[role='button']:has-text('Switch')",
+                    "div[aria-label='Switch']",
+                    "div[aria-label*='Chuyển sang']",
+                    "div[aria-label*='Switch to']",
+                    "div[aria-label='Chuyển trang']",
                     "div[role='button']:has-text('Đổi')",
+                    "a:has-text('Chuyển ngay')",
                     "a:has-text('Switch now')",
-                    "a:has-text('Chuyển ngay')"
+                    "div[role='banner'] div[role='button']:has-text('Chuyển')",
+                    "div[role='banner'] div[role='button']:has-text('Switch')",
+                    "div[role='main'] div[role='button']:has-text('Chuyển')",
+                    "div[role='main'] div[role='button']:has-text('Switch')"
                 };
 
-                foreach (var selector in switchSelectors)
-                {
-                    var btn = await page.QuerySelectorAsync(selector).ConfigureAwait(false);
-                    if (btn != null && await btn.IsVisibleAsync().ConfigureAwait(false))
-                    {
-                        AppLogger.Info("PageSwitch", $"Found switch button with selector: {selector}. Clicking...");
-                        
-                        try
-                        {
-                            await Task.WhenAll(
-                                page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }).ContinueWith(_ => { }),
-                                btn.ClickAsync()
-                            ).ConfigureAwait(false);
-                        }
-                        catch
-                        {
-                            await btn.ClickAsync().ConfigureAwait(false);
-                        }
+                IElementHandle? switchBtn = null;
+                string matchedSelector = "";
 
-                        // Wait for any switch confirmation modal if present
-                        await HandleConfirmModalIfPresentAsync(page).ConfigureAwait(false);
-                        return true;
+                // Chờ nút Chuyển hiển thị tối đa 8000ms (8 giây) do Facebook cần 2-3s để redirect URL và render nút
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 8000)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    foreach (var selector in switchSelectors)
+                    {
+                        var btn = await page.QuerySelectorAsync(selector).ConfigureAwait(false);
+                        if (btn != null && await btn.IsVisibleAsync().ConfigureAwait(false))
+                        {
+                            switchBtn = btn;
+                            matchedSelector = selector;
+                            break;
+                        }
                     }
+
+                    if (switchBtn != null)
+                        break;
+
+                    await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (switchBtn != null)
+                {
+                    AppLogger.Info("PageSwitch", $"Found switch button with selector: {matchedSelector} after {sw.ElapsedMilliseconds}ms. Clicking...");
+
+                    try
+                    {
+                        await Task.WhenAll(
+                            page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }).ContinueWith(_ => { }),
+                            switchBtn.ClickAsync()
+                        ).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        await switchBtn.ClickAsync().ConfigureAwait(false);
+                    }
+
+                    // Wait for any switch confirmation modal if present
+                    await HandleConfirmModalIfPresentAsync(page).ConfigureAwait(false);
+                    return true;
+                }
+                else
+                {
+                    string warnMsg = $"[WARNING] [PageSwitch] Không tìm thấy nút Chuyển trên trang {pageId} (URL hiện tại: {page.Url})";
+                    AppLogger.Warn("PageSwitch", warnMsg);
+                    try { Console.WriteLine(warnMsg); } catch { }
                 }
             }
             catch (Exception ex)
@@ -80,7 +117,9 @@ namespace ViaManager.Services
                     "svg[aria-label='Your profile']",
                     "div[aria-label='Your profile']",
                     "div[aria-label='Trang cá nhân của bạn']",
-                    "div[role='button'][aria-label*='profile']"
+                    "div[role='button'][aria-label*='profile']",
+                    "div[role='button'][aria-label*='Trang cá nhân']",
+                    "div[role='button'][aria-label*='Hồ sơ']"
                 };
 
                 IElementHandle? avatarBtn = null;
@@ -97,7 +136,7 @@ namespace ViaManager.Services
                     await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
 
                     // Look for "See all profiles" / "Xem tất cả trang cá nhân"
-                    var seeAllBtn = await page.QuerySelectorAsync("div[role='button']:has-text('See all profiles'), div[role='button']:has-text('Xem tất cả trang cá nhân')").ConfigureAwait(false);
+                    var seeAllBtn = await page.QuerySelectorAsync("div[role='button']:has-text('See all profiles'), div[role='button']:has-text('Xem tất cả trang cá nhân'), div[role='button']:has-text('Xem tất cả trang'), div[role='button']:has-text('See all pages'), span:has-text('See all profiles'), span:has-text('Xem tất cả trang cá nhân')").ConfigureAwait(false);
                     if (seeAllBtn != null)
                     {
                         await seeAllBtn.ClickAsync().ConfigureAwait(false);
@@ -131,26 +170,42 @@ namespace ViaManager.Services
         {
             try
             {
-                var confirmModalSelectors = new[]
+                // Chờ hộp thoại xác nhận tối đa 3 giây
+                for (int wait = 0; wait < 3; wait++)
                 {
-                    "div[role='dialog'] div[role='button']:has-text('Switch')",
-                    "div[role='dialog'] div[role='button']:has-text('Chuyển')",
-                    "div[role='dialog'] div[role='button']:has-text('Switch now')",
-                    "div[role='dialog'] div[role='button']:has-text('Chuyển ngay')"
-                };
-
-                foreach (var sel in confirmModalSelectors)
-                {
-                    var confirmBtn = await page.QuerySelectorAsync(sel).ConfigureAwait(false);
-                    if (confirmBtn != null && await confirmBtn.IsVisibleAsync().ConfigureAwait(false))
+                    var confirmModalSelectors = new[]
                     {
-                        AppLogger.Info("PageSwitch", $"Confirmation dialog detected. Clicking confirm: {sel}");
-                        await Task.WhenAll(
-                            page.WaitForLoadStateAsync(LoadState.NetworkIdle, new() { Timeout = 15000 }).ContinueWith(_ => { }),
-                            confirmBtn.ClickAsync()
-                        ).ConfigureAwait(false);
-                        break;
+                        "div[role='dialog'] div[role='button']:has-text('Chuyển')",
+                        "div[role='dialog'] div[role='button']:has-text('Switch')",
+                        "div[role='dialog'] div[role='button']:has-text('Chuyển ngay')",
+                        "div[role='dialog'] div[role='button']:has-text('Switch now')",
+                        "div[role='dialog'] [aria-label='Chuyển']",
+                        "div[role='dialog'] [aria-label='Switch']"
+                    };
+
+                    bool clicked = false;
+                    foreach (var sel in confirmModalSelectors)
+                    {
+                        var confirmBtn = await page.QuerySelectorAsync(sel).ConfigureAwait(false);
+                        if (confirmBtn != null && await confirmBtn.IsVisibleAsync().ConfigureAwait(false))
+                        {
+                            AppLogger.Info("PageSwitch", $"Confirmation dialog detected. Clicking confirm: {sel}");
+                            try
+                            {
+                                await confirmBtn.ClickAsync().ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                                await confirmBtn.ClickAsync().ConfigureAwait(false);
+                            }
+                            await Task.Delay(1500).ConfigureAwait(false);
+                            clicked = true;
+                            break;
+                        }
                     }
+
+                    if (clicked) break;
+                    await Task.Delay(1000).ConfigureAwait(false);
                 }
             }
             catch { }

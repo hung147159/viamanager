@@ -44,6 +44,34 @@ namespace ViaManager.Services
                 }
                 catch { }
 
+                // Cuộn trang từ từ xuống cuối để tải toàn bộ danh sách Page (Lazy Loading)
+                long prevH = 0;
+                int unchanged = 0;
+                int scrolls = 0;
+                while (unchanged < 2 && scrolls++ < 40)
+                {
+                    long curH = await page.EvaluateAsync<long>(@"() => {
+                        window.scrollTo(0, document.body.scrollHeight || document.documentElement.scrollHeight);
+                        const mainEl = document.querySelector('div[role=""main""]') || document.scrollingElement || document.documentElement;
+                        if (mainEl && mainEl.scrollHeight > mainEl.clientHeight) {
+                            mainEl.scrollTop = mainEl.scrollHeight;
+                        }
+                        return Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0, mainEl ? mainEl.scrollHeight : 0);
+                    }").ConfigureAwait(false);
+
+                    if (curH == prevH)
+                    {
+                        unchanged++;
+                    }
+                    else
+                    {
+                        unchanged = 0;
+                        prevH = curH;
+                    }
+
+                    await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
+                }
+
                 // Script to accurately extract Page IDs and names from the DOM and Facebook data layer
                 const string extractionScript = @"
                     () => {
@@ -51,9 +79,11 @@ namespace ViaManager.Services
                         const seenIds = new Set();
 
                         // 1. Scan links for /pages/ or /profile.php?id= or direct vanity URLs
+                        const excludeKeywords = /friends|watch|marketplace|groups|gaming|bookmarks|events|saved|memories|messages|notifications|settings|privacy|policies|help|create|invites|category=your_pages|ads|business|login|recover|user|\/posts\/|\/photos\/|\/videos\/|story_fbid|set=a\.|fbid=|\/stories\/|\/permalink\//i;
                         const links = Array.from(document.querySelectorAll('a[href]'));
                         for (const a of links) {
                             const href = a.getAttribute('href') || '';
+                            if (!href || excludeKeywords.test(href)) continue;
                             const text = (a.innerText || '').trim();
 
                             let pageId = null;
@@ -78,6 +108,14 @@ namespace ViaManager.Services
                                 if (targetMatch) {
                                     pageId = targetMatch[1];
                                 }
+                            }
+
+                            // CẤM TUYỆT ĐỐI lấy các chuỗi số dài >= 17 chữ số bắt đầu bằng 122 (post_id / photo_id)
+                            if (pageId && pageId.length >= 17 && pageId.startsWith('122')) {
+                                pageId = null;
+                            }
+                            if (pageId && pageId.length > 16 && !pageId.startsWith('615')) {
+                                pageId = null;
                             }
 
                             if (pageId) {
@@ -137,10 +175,12 @@ namespace ViaManager.Services
                         string id = elem.GetProperty("id").GetString() ?? "";
                         string name = elem.GetProperty("name").GetString() ?? id;
 
-                        // Filter condition: Numeric ID, length >= 10, MUST NOT be VIA's own UID
+                        // Filter condition: Numeric ID, length >= 10, MUST NOT be VIA's own UID, KHÔNG PHẢI ID bài viết 18 chữ số đầu 122...
                         if (!string.IsNullOrWhiteSpace(id) &&
                             id.Length >= 10 &&
                             Regex.IsMatch(id, @"^\d+$") &&
+                            !(id.Length >= 17 && id.StartsWith("122")) &&
+                            (id.Length <= 16 || id.StartsWith("615")) &&
                             !id.Equals(currentViaUid, StringComparison.OrdinalIgnoreCase))
                         {
                             if (!candidates.Any(c => c.PageId.Equals(id, StringComparison.OrdinalIgnoreCase)))

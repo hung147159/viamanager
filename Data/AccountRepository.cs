@@ -19,14 +19,17 @@ namespace ViaManager.Data
         {
             var conn = new SqliteConnection(_connectionString);
             conn.Open();
-            using var pragmaCmd = conn.CreateCommand();
-            pragmaCmd.CommandText = @"
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA foreign_keys = ON;
-                PRAGMA busy_timeout = 15000;
-            ";
-            pragmaCmd.ExecuteNonQuery();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA busy_timeout = 30000;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA journal_mode = WAL;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA synchronous = NORMAL;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA foreign_keys = ON;";
+                cmd.ExecuteNonQuery();
+            }
             return conn;
         }
 
@@ -248,6 +251,65 @@ namespace ViaManager.Data
             ";
             var result = cmd.ExecuteScalar();
             return (result != null && int.TryParse(result.ToString(), out int cnt)) ? cnt : 0;
+        }
+
+        public int DeleteAccounts(IEnumerable<string> uids)
+        {
+            if (uids == null) return 0;
+            var uidList = uids.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).ToList();
+            if (uidList.Count == 0) return 0;
+
+            const int maxRetries = 3;
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                try
+                {
+                    using var conn = CreateOpenConnection();
+                    using var transaction = conn.BeginTransaction(deferred: false);
+                    try
+                    {
+                        using var cmdAssigned = conn.CreateCommand();
+                        cmdAssigned.Transaction = transaction;
+                        cmdAssigned.CommandText = "DELETE FROM AssignedPages WHERE Via_UID = $id;";
+                        var pAssignedId = cmdAssigned.Parameters.Add("$id", SqliteType.Text);
+
+                        using var cmdAccount = conn.CreateCommand();
+                        cmdAccount.Transaction = transaction;
+                        cmdAccount.CommandText = "DELETE FROM Accounts WHERE ID = $id;";
+                        var pAccountId = cmdAccount.Parameters.Add("$id", SqliteType.Text);
+
+                        int count = 0;
+                        foreach (var id in uidList)
+                        {
+                            pAssignedId.Value = id;
+                            cmdAssigned.ExecuteNonQuery();
+
+                            pAccountId.Value = id;
+                            cmdAccount.ExecuteNonQuery();
+
+                            count++;
+                        }
+
+                        transaction.Commit();
+                        return count;
+                    }
+                    catch (Exception ex)
+                    {
+                        try { transaction.Rollback(); } catch { }
+                        if (attempt == maxRetries)
+                        {
+                            AppLogger.Error("AccountRepository", "DeleteAccounts failed after retries, transaction rolled back.", ex);
+                            throw;
+                        }
+                    }
+                }
+                catch (SqliteException sex) when (sex.SqliteErrorCode == 5 && attempt < maxRetries)
+                {
+                    System.Threading.Thread.Sleep(500 * attempt);
+                    continue;
+                }
+            }
+            return 0;
         }
     }
 }

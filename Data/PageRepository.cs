@@ -20,14 +20,17 @@ namespace ViaManager.Data
         {
             var conn = new SqliteConnection(_connectionString);
             conn.Open();
-            using var pragmaCmd = conn.CreateCommand();
-            pragmaCmd.CommandText = @"
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA foreign_keys = ON;
-                PRAGMA busy_timeout = 15000;
-            ";
-            pragmaCmd.ExecuteNonQuery();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA busy_timeout = 30000;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA journal_mode = WAL;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA synchronous = NORMAL;";
+                cmd.ExecuteNonQuery();
+                cmd.CommandText = "PRAGMA foreign_keys = ON;";
+                cmd.ExecuteNonQuery();
+            }
             return conn;
         }
 
