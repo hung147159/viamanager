@@ -49,6 +49,9 @@ namespace ViaManager.Services
             AppLogger.Debug("BrowserProfileService", $"Acquiring profile lock for UID: {viaUid}");
             await sem.WaitAsync(cancellationToken).ConfigureAwait(false);
 
+            IPlaywright? playwright = null;
+            IBrowserContext? context = null;
+
             try
             {
                 string profilePath = Path.Combine(_baseProfilesDirectory, viaUid);
@@ -57,7 +60,7 @@ namespace ViaManager.Services
                     Directory.CreateDirectory(profilePath);
                 }
 
-                var playwright = await Playwright.CreateAsync().ConfigureAwait(false);
+                playwright = await Playwright.CreateAsync().ConfigureAwait(false);
 
                 // Configure arguments safely. Insecure flags are excluded by default for security.
                 // Bổ sung các cờ tối ưu hóa cache để giới hạn dung lượng lưu trữ rác Chromium
@@ -103,13 +106,21 @@ namespace ViaManager.Services
                 };
 
                 AppLogger.Info("BrowserProfileService", $"Launching persistent context for UID {viaUid} (Headless: {isHeadless}, Channel: {channel ?? "bundled"})");
-                var context = await playwright.Chromium.LaunchPersistentContextAsync(profilePath, contextOptions).ConfigureAwait(false);
+                context = await playwright.Chromium.LaunchPersistentContextAsync(profilePath, contextOptions).ConfigureAwait(false);
                 var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync().ConfigureAwait(false);
 
                 return new BrowserProfileSession(viaUid, profilePath, sem, playwright, context, page);
             }
             catch (Exception ex)
             {
+                if (context != null)
+                {
+                    try { await context.CloseAsync().ConfigureAwait(false); } catch { }
+                }
+                if (playwright != null)
+                {
+                    try { playwright.Dispose(); } catch { }
+                }
                 sem.Release();
                 AppLogger.Error("BrowserProfileService", $"Failed to initialize browser session for UID {viaUid}", ex);
                 throw;

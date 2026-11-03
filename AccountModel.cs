@@ -100,67 +100,35 @@ public static class TotpGenerator
 public static class CookieHelper
 {
     /// <summary>
-    /// Formats page cookie using verbatim serialization directly from the browser context.
-    /// Absolute Invariant: Zero Cookie Mutation. Never inject synthetic i_user or override c_user.
+    /// Serializes cookies directly from browser context with ZERO fabrication.
+    /// Never mutates, overrides, or synthesizes cookies regardless of pageId or fallbackUid passed.
     /// </summary>
-    public static string FormatPageCookie(IReadOnlyList<BrowserContextCookiesResult> cookies, string pageId, string fallbackUid)
+    public static string FormatPageCookie(IEnumerable<BrowserContextCookiesResult> cookies, string? pageId = null, string? fallbackUid = null)
     {
         return ViaManager.Utilities.CookieSerializer.SerializeVerbatim(cookies);
     }
 
     public static string ExtractCookieValue(string cookieString, string key)
     {
-        if (string.IsNullOrWhiteSpace(cookieString) || string.IsNullOrWhiteSpace(key))
-            return "";
-
-        var match = System.Text.RegularExpressions.Regex.Match(
-            cookieString,
-            $@"(?:^|;\s*){System.Text.RegularExpressions.Regex.Escape(key)}=([^;]+)",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        );
-
-        if (match.Success)
-        {
-            return match.Groups[1].Value.Trim();
-        }
-
-        return "";
+        return ViaManager.Utilities.CookieSerializer.ExtractValue(cookieString, key);
     }
 
     public static List<Microsoft.Playwright.Cookie> ParseCookieString(string cookieString)
     {
         var list = new List<Microsoft.Playwright.Cookie>();
-        if (string.IsNullOrWhiteSpace(cookieString))
-            return list;
-
-        var pairs = cookieString.Split(';', StringSplitOptions.RemoveEmptyEntries);
-        foreach (var rawPair in pairs)
+        var dict = ViaManager.Utilities.CookieSerializer.ParseCookieHeader(cookieString);
+        foreach (var kvp in dict)
         {
-            string pair = rawPair.Trim();
-            if (string.IsNullOrEmpty(pair))
-                continue;
-
-            int eqIdx = pair.IndexOf('=');
-            if (eqIdx <= 0)
-                continue;
-
-            string name = pair.Substring(0, eqIdx).Trim();
-            string val = pair.Substring(eqIdx + 1).Trim();
-
-            if (string.IsNullOrEmpty(name))
-                continue;
-
             list.Add(new Microsoft.Playwright.Cookie
             {
-                Name = name,
-                Value = val,
+                Name = kvp.Key,
+                Value = kvp.Value,
                 Domain = ".facebook.com",
                 Path = "/",
                 Secure = true,
                 SameSite = Microsoft.Playwright.SameSiteAttribute.None
             });
         }
-
         return list;
     }
 }
